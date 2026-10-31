@@ -408,9 +408,16 @@ class UHF(hf.SCF):
             ddm = ddm - dm_last
         else:
             dm_last = None
-        vj = self.get_j(mol, ddm[0]+ddm[1], hermi)
+        vhf = None
+        if self.jk_one_pass:
+            # J and K in one Rys pass, see hf.get_veff
+            vj, vhf = self.get_jk(mol, ddm, hermi)
+            vj = vj[0] + vj[1]
+        else:
+            vj = self.get_j(mol, ddm[0]+ddm[1], hermi)
         ecoul = _trace_ecoul(vj, ddm, dm_last, vhf_last)
-        vhf = self.get_k(mol, ddm, hermi)
+        if vhf is None:
+            vhf = self.get_k(mol, ddm, hermi)
         vhf *= -1
         vhf += vj
         if dm_last is not None:

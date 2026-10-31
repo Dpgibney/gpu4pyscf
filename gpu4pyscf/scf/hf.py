@@ -98,9 +98,15 @@ def get_veff(mf, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
         ddm = ddm - dm_last
     else:
         dm_last = None
-    vj = mf.get_j(mol, ddm, hermi)
+    vhf = None
+    if mf.jk_one_pass:
+        # J and K in one Rys pass instead of the MD J-engine plus a K-only Rys pass
+        vj, vhf = mf.get_jk(mol, ddm, hermi)
+    else:
+        vj = mf.get_j(mol, ddm, hermi)
     ecoul = _trace_ecoul(vj, ddm, dm_last, vhf_last)
-    vhf = mf.get_k(mol, ddm, hermi)
+    if vhf is None:
+        vhf = mf.get_k(mol, ddm, hermi)
     vhf *= -.5
     vhf += vj
     if dm_last is not None:
@@ -993,6 +999,10 @@ class SCF(pyscf_lib.StreamObject):
     level_shift         = None
     direct_scf          = hf_cpu.SCF.direct_scf
     direct_scf_tol      = hf_cpu.SCF.direct_scf_tol
+    # Build J and K of HF and global hybrids in one Rys pass instead of the MD J-engine plus a K-only
+    # Rys pass. Exact. Faster where the K-only pass's exchange screening gains little (small and medium
+    # molecules); off by default.
+    jk_one_pass         = getattr(__config__, 'scf_hf_SCF_jk_one_pass', False)
     conv_check          = hf_cpu.SCF.conv_check
     callback            = hf_cpu.SCF.callback
 
@@ -1000,7 +1010,7 @@ class SCF(pyscf_lib.StreamObject):
         'conv_tol', 'conv_tol_grad', 'conv_tol_cpscf', 'max_cycle', 'init_guess',
         'sap_basis', 'DIIS', 'diis', 'diis_space', 'diis_damp', 'diis_start_cycle',
         'diis_file', 'diis_space_rollback', 'damp', 'level_shift',
-        'direct_scf', 'direct_scf_tol', 'conv_check', 'callback',
+        'direct_scf', 'direct_scf_tol', 'jk_one_pass', 'conv_check', 'callback',
         'mol', 'chkfile', 'mo_energy', 'mo_coeff', 'mo_occ',
         'e_tot', 'converged', 'cycles', 'scf_summary',
         'disp', 'disp_with_3body',
@@ -1109,6 +1119,8 @@ class SCF(pyscf_lib.StreamObject):
         log.info('direct_scf = %s', self.direct_scf)
         if self.direct_scf:
             log.info('direct_scf_tol = %g', self.direct_scf_tol)
+        if self.jk_one_pass:
+            log.info('jk_one_pass = %s', self.jk_one_pass)
         if self.chkfile:
             log.info('chkfile to save SCF result = %s', self.chkfile)
         return self

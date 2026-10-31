@@ -64,13 +64,24 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
         dm = dm - dm_last
     else:
         dm_last = None
-    vhf = vj = ks.get_j(mol, dm[0]+dm[1], hermi)
+    hybrid = ni.libxc.is_hybrid_xc(ks.xc)
+    if hybrid:
+        omega, alpha, hyb = ni.rsh_and_hybrid_coeff(ks.xc, spin=mol.spin)
+    vk = None
+    if hybrid and ks.jk_one_pass and omega == 0:
+        # J and K in one Rys pass, see hf.get_veff. jk.get_jk has no such pass for range-separated K.
+        vj, vk = ks.get_jk(mol, dm, hermi)
+        vj = vj[0] + vj[1]
+        vk *= hyb
+    else:
+        vj = ks.get_j(mol, dm[0]+dm[1], hermi)
+    vhf = vj
     ecoul = uhf._trace_ecoul(vj, dm, dm_last, vhf_last)
     cput2 = log.timer_debug1('vj', *t1)
 
-    if ni.libxc.is_hybrid_xc(ks.xc):
-        omega, alpha, hyb = ni.rsh_and_hybrid_coeff(ks.xc, spin=mol.spin)
-        vk = ks.get_k(mol, dm, hermi, omega, alpha, hyb)
+    if hybrid:
+        if vk is None:
+            vk = ks.get_k(mol, dm, hermi, omega, alpha, hyb)
         vhf = vj - vk
         if vj_last is not None:
             vhf += asarray(vhf_last.vj)
