@@ -6,7 +6,6 @@
 #include "gvhf-rys/rys_contract_k.cuh"
 #include "gvhf-rys/create_tasks.cu"
 #include "gvhf-rys/unrolled_kernels.cuh"
-#define PRIM_CUTOFF 8.75651076269652e-27  // e^-60, libcint expcutoff
 
 
 __global__ static
@@ -3676,6 +3675,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -5428,6 +5428,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -6693,6 +6694,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -8172,6 +8174,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -9977,6 +9980,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -11979,6 +11983,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;

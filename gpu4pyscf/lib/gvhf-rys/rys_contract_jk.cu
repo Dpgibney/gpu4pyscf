@@ -221,6 +221,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;

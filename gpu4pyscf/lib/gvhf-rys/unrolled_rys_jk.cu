@@ -116,8 +116,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -125,6 +125,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -300,8 +301,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -309,6 +310,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -525,8 +527,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -534,6 +536,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -797,8 +800,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -806,6 +809,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -1220,8 +1224,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -1229,6 +1233,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -1491,8 +1496,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -1500,6 +1505,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -1914,8 +1920,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -1923,6 +1929,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -2404,8 +2411,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -2413,6 +2420,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -2672,8 +2680,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -2681,6 +2689,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -3050,8 +3059,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -3059,6 +3068,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -3660,8 +3670,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -3669,6 +3679,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -4140,6 +4151,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -5487,8 +5499,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -5496,6 +5508,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -5863,8 +5876,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -5872,6 +5885,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -6489,6 +6503,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -8153,6 +8168,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -9605,8 +9621,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -9614,6 +9630,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -10088,6 +10105,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -11443,8 +11461,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -11452,6 +11470,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -11766,8 +11785,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -11775,6 +11794,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -12278,6 +12298,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -13547,8 +13568,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -13556,6 +13577,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -14280,8 +14302,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -14289,6 +14311,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -14790,6 +14813,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -16055,8 +16079,8 @@ while (1) {
                 fac_sym = 0;
             }
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
-                __syncthreads();
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -16064,6 +16088,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;

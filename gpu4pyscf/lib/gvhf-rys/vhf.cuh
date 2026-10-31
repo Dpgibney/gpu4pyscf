@@ -34,6 +34,9 @@
 
 // 2*pi**2.5
 #define PI_FAC          34.98683665524972497
+// exp(-60), the expcutoff of libcint: the K and J+K kernels skip primitive pairs whose
+// c_i c_j exp(-a_i a_j/(a_i+a_j) |R_ij|^2) is smaller
+#define PRIM_CUTOFF     8.75651076269652e-27
 
 
 #pragma once
