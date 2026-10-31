@@ -123,6 +123,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -131,13 +132,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -163,18 +159,17 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     fx = ai2 * trr_10x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     goutx[0] +=  fx  * 1 * wt;
@@ -367,6 +362,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -375,13 +371,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -407,22 +398,21 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
                     fx = ai2 * trr_11x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_01x = cpx * 1;
@@ -676,6 +666,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -684,13 +675,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -716,26 +702,25 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
                     double trr_01x = cpx * 1;
                     double trr_12x = cpx * trr_11x + 1*b01 * trr_10x + 1*b00 * trr_01x;
                     double hrr_1011x = trr_12x - xlxk * trr_11x;
                     fx = ai2 * hrr_1011x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_02x = cpx * trr_01x + 1*b01 * 1;
@@ -1137,6 +1122,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -1145,13 +1131,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -1177,25 +1158,24 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
                     double trr_01x = cpx * 1;
                     double trr_12x = cpx * trr_11x + 1*b01 * trr_10x + 1*b00 * trr_01x;
                     fx = ai2 * trr_12x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_02x = cpx * trr_01x + 1*b01 * 1;
@@ -1588,6 +1568,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -1596,13 +1577,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -1628,16 +1604,15 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
                     double trr_01x = cpx * 1;
@@ -1646,10 +1621,10 @@ while (1) {
                     double trr_13x = cpx * trr_12x + 2*b01 * trr_11x + 1*b00 * trr_02x;
                     double hrr_1021x = trr_13x - xlxk * trr_12x;
                     fx = ai2 * hrr_1021x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_03x = cpx * trr_02x + 2*b01 * trr_01x;
@@ -2247,6 +2222,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -2255,13 +2231,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -2287,16 +2258,15 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
                     double trr_01x = cpx * 1;
@@ -2309,10 +2279,10 @@ while (1) {
                     double hrr_1021x = trr_13x - xlxk * trr_12x;
                     double hrr_1022x = hrr_1031x - xlxk * hrr_1021x;
                     fx = ai2 * hrr_1022x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_04x = cpx * trr_03x + 3*b01 * trr_02x;
@@ -2818,6 +2788,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -2826,13 +2797,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -2858,23 +2824,22 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
                     double trr_01x = cpx * 1;
                     double trr_12x = cpx * trr_11x + 1*b01 * trr_10x + 1*b00 * trr_01x;
                     fx = ai2 * trr_12x;
                     double cpy = yqc + ypq*rt_akl;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     double trr_11y = cpy * trr_10y + 1*b00 * 1;
                     double trr_01y = cpy * 1;
@@ -2883,7 +2848,7 @@ while (1) {
                     double hrr_1001y = trr_11y - ylyk * trr_10y;
                     double hrr_1002y = hrr_1011y - ylyk * hrr_1001y;
                     fy = ai2 * hrr_1002y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_02x = cpx * trr_01x + 1*b01 * 1;
@@ -3489,6 +3454,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -3497,13 +3463,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -3529,21 +3490,20 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double hrr_1100x = trr_20x - rjri[0] * trr_10x;
                     fx = ai2 * hrr_1100x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double hrr_0100x = trr_10x - rjri[0] * 1;
@@ -3797,6 +3757,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -3805,13 +3766,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -3837,26 +3793,25 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_21x = cpx * trr_20x + 2*b00 * trr_10x;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
                     double hrr_1110x = trr_21x - rjri[0] * trr_11x;
                     fx = ai2 * hrr_1110x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_01x = cpx * 1;
@@ -4258,6 +4213,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -4266,13 +4222,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -4298,17 +4249,16 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_21x = cpx * trr_20x + 2*b00 * trr_10x;
@@ -4320,10 +4270,10 @@ while (1) {
                     double hrr_1011x = trr_12x - xlxk * trr_11x;
                     double hrr_1111x = hrr_2011x - rjri[0] * hrr_1011x;
                     fx = ai2 * hrr_1111x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_02x = cpx * trr_01x + 1*b01 * 1;
@@ -4938,6 +4888,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -4946,13 +4897,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -4978,17 +4924,16 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_21x = cpx * trr_20x + 2*b00 * trr_10x;
@@ -4998,10 +4943,10 @@ while (1) {
                     double trr_12x = cpx * trr_11x + 1*b01 * trr_10x + 1*b00 * trr_01x;
                     double hrr_1120x = trr_22x - rjri[0] * trr_12x;
                     fx = ai2 * hrr_1120x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_02x = cpx * trr_01x + 1*b01 * 1;
@@ -5618,6 +5563,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -7857,6 +7803,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -7865,13 +7812,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -7897,13 +7839,12 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
@@ -7911,10 +7852,10 @@ while (1) {
                     double hrr_1100x = trr_20x - rjri[0] * trr_10x;
                     double hrr_1200x = hrr_2100x - rjri[0] * hrr_1100x;
                     fx = ai2 * hrr_1200x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double hrr_0100x = trr_10x - rjri[0] * 1;
@@ -8312,6 +8253,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -8320,13 +8262,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -8352,16 +8289,15 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
@@ -8372,10 +8308,10 @@ while (1) {
                     double hrr_1110x = trr_21x - rjri[0] * trr_11x;
                     double hrr_1210x = hrr_2110x - rjri[0] * hrr_1110x;
                     fx = ai2 * hrr_1210x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_01x = cpx * 1;
@@ -9000,6 +8936,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -11047,6 +10984,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -11055,13 +10993,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -11087,17 +11020,16 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
@@ -11112,10 +11044,10 @@ while (1) {
                     double hrr_1120x = trr_22x - rjri[0] * trr_12x;
                     double hrr_1220x = hrr_2120x - rjri[0] * hrr_1120x;
                     fx = ai2 * hrr_1220x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_02x = cpx * trr_01x + 1*b01 * 1;
@@ -11625,6 +11557,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -11633,13 +11566,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -11665,14 +11593,13 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
@@ -11683,13 +11610,13 @@ while (1) {
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpy = yqc + ypq*rt_akl;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     double trr_11y = cpy * trr_10y + 1*b00 * 1;
                     double trr_01y = cpy * 1;
                     double trr_12y = cpy * trr_11y + 1*b01 * trr_10y + 1*b00 * trr_01y;
                     fy = ai2 * trr_12y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double hrr_0100x = trr_10x - rjri[0] * 1;
@@ -12305,6 +12232,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -12313,13 +12241,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -12345,20 +12268,19 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     fx = ai2 * trr_20x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     fx -= 1 * 1;
@@ -12610,6 +12532,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -12618,13 +12541,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -12650,24 +12568,23 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_21x = cpx * trr_20x + 2*b00 * trr_10x;
                     fx = ai2 * trr_21x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_01x = cpx * 1;
@@ -13068,6 +12985,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -13076,13 +12994,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -13108,17 +13021,16 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_21x = cpx * trr_20x + 2*b00 * trr_10x;
@@ -13126,10 +13038,10 @@ while (1) {
                     double trr_22x = cpx * trr_21x + 1*b01 * trr_20x + 2*b00 * trr_11x;
                     double hrr_2011x = trr_22x - xlxk * trr_21x;
                     fx = ai2 * hrr_2011x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_01x = cpx * 1;
@@ -13751,6 +13663,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -13759,13 +13672,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -13791,27 +13699,26 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_21x = cpx * trr_20x + 2*b00 * trr_10x;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
                     double trr_22x = cpx * trr_21x + 1*b01 * trr_20x + 2*b00 * trr_11x;
                     fx = ai2 * trr_22x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_01x = cpx * 1;
@@ -14431,6 +14338,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -16637,6 +16545,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -16645,13 +16554,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -16677,22 +16581,21 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
                     double hrr_2100x = trr_30x - rjri[0] * trr_20x;
                     fx = ai2 * hrr_2100x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double hrr_0100x = trr_10x - rjri[0] * 1;
@@ -17093,6 +16996,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -17101,13 +17005,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -17133,16 +17032,15 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
@@ -17150,10 +17048,10 @@ while (1) {
                     double trr_21x = cpx * trr_20x + 2*b00 * trr_10x;
                     double hrr_2110x = trr_31x - rjri[0] * trr_21x;
                     fx = ai2 * hrr_2110x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
@@ -17789,6 +17687,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -20177,6 +20076,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -22506,6 +22406,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -22514,13 +22415,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -22546,13 +22442,12 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
@@ -22561,10 +22456,10 @@ while (1) {
                     double hrr_2100x = trr_30x - rjri[0] * trr_20x;
                     double hrr_2200x = hrr_3100x - rjri[0] * hrr_2100x;
                     fx = ai2 * hrr_2200x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double hrr_1100x = trr_20x - rjri[0] * trr_10x;
@@ -23189,6 +23084,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -25403,6 +25299,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -25411,13 +25308,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -25443,21 +25335,20 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
                     fx = ai2 * trr_30x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     fx -= 2 * trr_10x;
@@ -25852,6 +25743,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -25860,13 +25752,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -25892,25 +25779,24 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
                     double trr_31x = cpx * trr_30x + 3*b00 * trr_20x;
                     fx = ai2 * trr_31x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
@@ -26537,6 +26423,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -28527,6 +28414,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -28535,13 +28423,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -28567,17 +28450,16 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpx = xqc + xpq*rt_akl;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
@@ -28585,10 +28467,10 @@ while (1) {
                     double trr_21x = cpx * trr_20x + 2*b00 * trr_10x;
                     double trr_32x = cpx * trr_31x + 1*b01 * trr_30x + 3*b00 * trr_21x;
                     fx = ai2 * trr_32x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double trr_11x = cpx * trr_10x + 1*b00 * 1;
@@ -29102,6 +28984,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -29110,13 +28993,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -29142,14 +29020,13 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double b00 = .5 * rt_aa;
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
@@ -29157,13 +29034,13 @@ while (1) {
                     double rt_akl = rt_aa * aij;
                     double b01 = .5/akl * (1 - rt_akl);
                     double cpy = yqc + ypq*rt_akl;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     double trr_11y = cpy * trr_10y + 1*b00 * 1;
                     double trr_01y = cpy * 1;
                     double trr_12y = cpy * trr_11y + 1*b01 * trr_10y + 1*b00 * trr_01y;
                     fy = ai2 * trr_12y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     fx -= 2 * trr_10x;
@@ -29774,6 +29651,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -29782,13 +29660,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -29814,23 +29687,22 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
                     double trr_40x = c0x * trr_30x + 3*b10 * trr_20x;
                     double hrr_3100x = trr_40x - rjri[0] * trr_30x;
                     fx = ai2 * hrr_3100x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double hrr_1100x = trr_20x - rjri[0] * trr_10x;
@@ -30457,6 +30329,7 @@ while (1) {
                 gx[0] = fac_sym * ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -32443,6 +32316,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -32451,13 +32325,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -32483,13 +32352,12 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
@@ -32499,10 +32367,10 @@ while (1) {
                     double hrr_3100x = trr_40x - rjri[0] * trr_30x;
                     double hrr_3200x = hrr_4100x - rjri[0] * hrr_3100x;
                     fx = ai2 * hrr_3200x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     fy = ai2 * trr_10y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     double hrr_2100x = trr_30x - rjri[0] * trr_20x;
@@ -33017,6 +32885,7 @@ while (1) {
             }
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = fac_sym * env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -33025,13 +32894,8 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
-                __syncthreads();
-                if (sq_id == 0) {
-                    aij_cache[0] = aij;
-                    aij_cache[1] = aj_aij;
-                    aij_cache[2] = ai * 2;
-                }
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
                 double zpa = rjri[2] * aj_aij;
@@ -33057,18 +32921,17 @@ while (1) {
                 for (int irys = 0; irys < nroots; ++irys) {
                     double wt = rw[(2*irys+1)*nsq_per_block] * fac;
                     double rt = rw[ 2*irys   *nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double fx, fy, fz;
-                    double ai2 = aij_cache[2];
+                    double ai2 = ai * 2;
                     double rt_aij = rt_aa * akl;
                     double b10 = .5/aij * (1 - rt_aij);
-                    double c0x = rjri[0] * aij_cache[1] - xpq*rt_aij;
+                    double c0x = rjri[0] * aj_aij - xpq*rt_aij;
                     double trr_10x = c0x * 1;
                     double trr_20x = c0x * trr_10x + 1*b10 * 1;
                     double trr_30x = c0x * trr_20x + 2*b10 * trr_10x;
                     fx = ai2 * trr_30x;
-                    double c0y = rjri[1] * aij_cache[1] - ypq*rt_aij;
+                    double c0y = rjri[1] * aj_aij - ypq*rt_aij;
                     double trr_10y = c0y * 1;
                     double trr_20y = c0y * trr_10y + 1*b10 * 1;
                     double trr_30y = c0y * trr_20y + 2*b10 * trr_10y;
@@ -33076,7 +32939,7 @@ while (1) {
                     double hrr_1100y = trr_20y - rjri[1] * trr_10y;
                     double hrr_1200y = hrr_2100y - rjri[1] * hrr_1100y;
                     fy = ai2 * hrr_1200y;
-                    double c0z = rjri[2] * aij_cache[1] - zpq*rt_aij;
+                    double c0z = rjri[2] * aj_aij - zpq*rt_aij;
                     double trr_10z = c0z * wt;
                     fz = ai2 * trr_10z;
                     fx -= 2 * trr_10x;

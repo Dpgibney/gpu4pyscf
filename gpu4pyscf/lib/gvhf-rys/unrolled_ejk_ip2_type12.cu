@@ -110,6 +110,7 @@ while (1) {
     double v1zy = 0;
     double v1zz = 0;
     for (int task_id = sq_id; task_id < ntasks+sq_id; task_id += nsq_per_block) {
+        if (task_id >= ntasks) break;
         uint32_t bas_kl = bas_kl_idx[task_id];
         int ksh = bas_kl / nbas;
         int lsh = bas_kl % nbas;
@@ -195,6 +196,7 @@ while (1) {
             double theta_kl = ak * al_akl;
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -205,6 +207,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -525,6 +528,7 @@ while (1) {
     double v1zy = 0;
     double v1zz = 0;
     for (int task_id = sq_id; task_id < ntasks+sq_id; task_id += nsq_per_block) {
+        if (task_id >= ntasks) break;
         uint32_t bas_kl = bas_kl_idx[task_id];
         int ksh = bas_kl / nbas;
         int lsh = bas_kl % nbas;
@@ -620,6 +624,7 @@ while (1) {
             double theta_kl = ak * al_akl;
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -630,6 +635,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -1157,6 +1163,7 @@ while (1) {
     double v1zy = 0;
     double v1zz = 0;
     for (int task_id = sq_id; task_id < ntasks+sq_id; task_id += nsq_per_block) {
+        if (task_id >= ntasks) break;
         uint32_t bas_kl = bas_kl_idx[task_id];
         int ksh = bas_kl / nbas;
         int lsh = bas_kl % nbas;
@@ -1282,6 +1289,7 @@ while (1) {
             double theta_kl = ak * al_akl;
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -1292,6 +1300,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -2668,6 +2677,7 @@ while (1) {
                 gx[0] = ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -4873,6 +4883,7 @@ while (1) {
     double v1zy = 0;
     double v1zz = 0;
     for (int task_id = sq_id; task_id < ntasks+sq_id; task_id += nsq_per_block) {
+        if (task_id >= ntasks) break;
         uint32_t bas_kl = bas_kl_idx[task_id];
         int ksh = bas_kl / nbas;
         int lsh = bas_kl % nbas;
@@ -4998,6 +5009,7 @@ while (1) {
             double theta_kl = ak * al_akl;
             double Kcd = exp(-theta_kl * (xlxk*xlxk+ylyk*ylyk+zlzk*zlzk));
             double ckcl = env[ck+kp] * env[cl+lp] * Kcd;
+            if (fabs(ckcl) < PRIM_CUTOFF) continue;
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
@@ -5008,6 +5020,7 @@ while (1) {
                 double aij = ai + aj;
                 double aj_aij = aj / aij;
                 double cicj = cicj_cache[ijp];
+                if (fabs(cicj) < PRIM_CUTOFF) continue;
                 double fac = cicj * ckcl / (aij*akl*sqrt(aij+akl));
                 double xpa = rjri[0] * aj_aij;
                 double ypa = rjri[1] * aj_aij;
@@ -6404,6 +6417,7 @@ while (1) {
                 gx[0] = ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
@@ -8739,6 +8753,7 @@ while (1) {
                 gx[0] = ckcl;
             }
             for (int ijp = 0; ijp < iprim*jprim; ++ijp) {
+                if (fabs(cicj_cache[ijp]) < PRIM_CUTOFF) continue;
                 int ip = ijp / jprim;
                 int jp = ijp % jprim;
                 double ai = env[expi+ip];
