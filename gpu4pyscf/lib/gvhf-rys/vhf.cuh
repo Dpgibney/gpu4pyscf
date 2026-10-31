@@ -28,6 +28,9 @@
 #define NCART_MAX       ((LMAX+1)*(LMAX+2)/2)
 
 #define QUEUE_DEPTH     65536
+// Task queues of QUEUE_DEPTH per SM in the pools jk.py allocates for RYS_build_k and RYS_build_jk
+// (multiProcessorCount * 262144 + 3 entries); the three heads follow the last queue.
+#define POOL_BLOCKS_PER_SM 4
 
 #define MIN(x, y)       ((x) < (y) ? (x) : (y))
 #define MAX(x, y)       ((x) > (y) ? (x) : (y))

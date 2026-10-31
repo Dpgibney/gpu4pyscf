@@ -1702,7 +1702,7 @@ int RYS_build_jk_ip1(double *vj, double *vk, double *dm, int n_dm, int nao, int 
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     int workers = prop.multiProcessorCount;
-    int *head = (int *)(pool + workers * QUEUE_DEPTH);
+    int *head = (int *)(pool + POOL_BLOCKS_PER_SM * workers * QUEUE_DEPTH);
     cudaMemset(head, 0, sizeof(int));
 
     if (!rys_vjk_ip1_unrolled(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
@@ -1797,7 +1797,7 @@ int RYS_per_atom_jk_ip1(double *ejk, double j_factor, double k_factor,
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     int workers = prop.multiProcessorCount;
-    int *head = (int *)(pool + workers * QUEUE_DEPTH);
+    int *head = (int *)(pool + POOL_BLOCKS_PER_SM * workers * QUEUE_DEPTH);
     cudaMemset(head, 0, sizeof(int));
 
     if (!rys_ejk_ip1_unrolled(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,

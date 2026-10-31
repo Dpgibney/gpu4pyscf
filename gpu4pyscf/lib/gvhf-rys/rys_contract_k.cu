@@ -657,7 +657,7 @@ int RYS_build_k(double *vk, double *dm, int n_dm, int nao,
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     int workers = prop.multiProcessorCount;
-    int *head = (int *)(pool + workers * QUEUE_DEPTH);
+    int *head = (int *)(pool + POOL_BLOCKS_PER_SM * workers * QUEUE_DEPTH);
     cudaMemset(head, 0, sizeof(int)*3);
 
     if (!rys_k_unrolled(envs, &kmat, &bounds, q_cond_ij, q_cond_kl, dm_penalty,

@@ -39,6 +39,14 @@
     KERNEL<<<workers, threads, buflen*sizeof(double)>>>( \
     *envs, *jk, *bounds, q_cond_ij, q_cond_kl, dm_penalty, s_cond_ij, s_cond_kl, diffuse_exps, pool, head)
 
+// The one-thread K, J+K and J/K-derivative kernels: as many persistent blocks per SM as fit, at most POOL_BLOCKS_PER_SM
+#define LAUNCH_JKMATRIX_KERNEL_PERSISTENT(KERNEL) { \
+    int blocks_per_sm = 1; \
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, KERNEL, nsq_per_block, buflen*sizeof(double)); \
+    blocks_per_sm = MAX(1, MIN(blocks_per_sm, MIN(4, POOL_BLOCKS_PER_SM))); \
+    KERNEL<<<workers*blocks_per_sm, threads, buflen*sizeof(double)>>>( \
+    *envs, *jk, *bounds, q_cond_ij, q_cond_kl, dm_penalty, s_cond_ij, s_cond_kl, diffuse_exps, pool, head); }
+
 #define JKENERGY_KERNEL_ARGS \
     RysIntEnvVars envs, JKEnergy jk, BoundsInfo bounds, \
     float *q_cond_ij, float *q_cond_kl, float dm_penalty, \
@@ -59,3 +67,11 @@
 #define LAUNCH_JKENERGY_KERNEL(KERNEL) \
     KERNEL<<<workers, threads, buflen*sizeof(double)>>>( \
     *envs, *jk, *bounds, q_cond_ij, q_cond_kl, dm_penalty, s_cond_ij, s_cond_kl, diffuse_exps, pool, dd_pool, head)
+
+// The one-thread energy-derivative kernels: as many persistent blocks per SM as fit, at most POOL_BLOCKS_PER_SM
+#define LAUNCH_JKENERGY_KERNEL_PERSISTENT(KERNEL) { \
+    int blocks_per_sm = 1; \
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, KERNEL, nsq_per_block, buflen*sizeof(double)); \
+    blocks_per_sm = MAX(1, MIN(blocks_per_sm, MIN(4, POOL_BLOCKS_PER_SM))); \
+    KERNEL<<<workers*blocks_per_sm, threads, buflen*sizeof(double)>>>( \
+    *envs, *jk, *bounds, q_cond_ij, q_cond_kl, dm_penalty, s_cond_ij, s_cond_kl, diffuse_exps, pool, dd_pool, head); }

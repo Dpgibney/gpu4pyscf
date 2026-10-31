@@ -33448,48 +33448,37 @@ int rys_vjk_ip1_unrolled(RysIntEnvVars *envs, JKMatrix *jk, BoundsInfo *bounds,
     int ll = bounds->ll;
     int ijkl = li*125 + lj*25 + lk*5 + ll;
     int nroots = bounds->nroots;
-    int nsq_per_block = 256;
+    int nsq_per_block = 128;
     int gout_stride = 1;
 
     switch (ijkl) {
     case 0: // (0, 0, 0, 0)
-        adjust_threads(rys_vjk_ip1_0000, nsq_per_block);
         break;
     case 5: // (0, 0, 1, 0)
-        adjust_threads(rys_vjk_ip1_0010, nsq_per_block);
         break;
     case 6: // (0, 0, 1, 1)
-        adjust_threads(rys_vjk_ip1_0011, nsq_per_block);
         break;
     case 10: // (0, 0, 2, 0)
-        adjust_threads(rys_vjk_ip1_0020, nsq_per_block);
         break;
     case 11: // (0, 0, 2, 1)
-        adjust_threads(rys_vjk_ip1_0021, nsq_per_block);
         break;
     case 12: // (0, 0, 2, 2)
         break;
     case 25: // (0, 1, 0, 0)
-        adjust_threads(rys_vjk_ip1_0100, nsq_per_block);
         break;
     case 30: // (0, 1, 1, 0)
-        adjust_threads(rys_vjk_ip1_0110, nsq_per_block);
         break;
     case 31: // (0, 1, 1, 1)
-        adjust_threads(rys_vjk_ip1_0111, nsq_per_block);
         break;
     case 35: // (0, 1, 2, 0)
-        adjust_threads(rys_vjk_ip1_0120, nsq_per_block);
         break;
     case 36: // (0, 1, 2, 1)
         nsq_per_block = 64;
         gout_stride = 4;
         break;
     case 50: // (0, 2, 0, 0)
-        adjust_threads(rys_vjk_ip1_0200, nsq_per_block);
         break;
     case 55: // (0, 2, 1, 0)
-        adjust_threads(rys_vjk_ip1_0210, nsq_per_block);
         break;
     case 56: // (0, 2, 1, 1)
         nsq_per_block = 64;
@@ -33498,26 +33487,20 @@ int rys_vjk_ip1_unrolled(RysIntEnvVars *envs, JKMatrix *jk, BoundsInfo *bounds,
     case 60: // (0, 2, 2, 0)
         break;
     case 125: // (1, 0, 0, 0)
-        adjust_threads(rys_vjk_ip1_1000, nsq_per_block);
         break;
     case 130: // (1, 0, 1, 0)
-        adjust_threads(rys_vjk_ip1_1010, nsq_per_block);
         break;
     case 131: // (1, 0, 1, 1)
-        adjust_threads(rys_vjk_ip1_1011, nsq_per_block);
         break;
     case 135: // (1, 0, 2, 0)
-        adjust_threads(rys_vjk_ip1_1020, nsq_per_block);
         break;
     case 136: // (1, 0, 2, 1)
         nsq_per_block = 64;
         gout_stride = 4;
         break;
     case 150: // (1, 1, 0, 0)
-        adjust_threads(rys_vjk_ip1_1100, nsq_per_block);
         break;
     case 155: // (1, 1, 1, 0)
-        adjust_threads(rys_vjk_ip1_1110, nsq_per_block);
         break;
     case 156: // (1, 1, 1, 1)
         nsq_per_block = 64;
@@ -33528,17 +33511,14 @@ int rys_vjk_ip1_unrolled(RysIntEnvVars *envs, JKMatrix *jk, BoundsInfo *bounds,
         gout_stride = 4;
         break;
     case 175: // (1, 2, 0, 0)
-        adjust_threads(rys_vjk_ip1_1200, nsq_per_block);
         break;
     case 180: // (1, 2, 1, 0)
         nsq_per_block = 64;
         gout_stride = 4;
         break;
     case 250: // (2, 0, 0, 0)
-        adjust_threads(rys_vjk_ip1_2000, nsq_per_block);
         break;
     case 255: // (2, 0, 1, 0)
-        adjust_threads(rys_vjk_ip1_2010, nsq_per_block);
         break;
     case 256: // (2, 0, 1, 1)
         nsq_per_block = 64;
@@ -33547,7 +33527,6 @@ int rys_vjk_ip1_unrolled(RysIntEnvVars *envs, JKMatrix *jk, BoundsInfo *bounds,
     case 260: // (2, 0, 2, 0)
         break;
     case 275: // (2, 1, 0, 0)
-        adjust_threads(rys_vjk_ip1_2100, nsq_per_block);
         break;
     case 280: // (2, 1, 1, 0)
         nsq_per_block = 64;
@@ -33563,52 +33542,52 @@ int rys_vjk_ip1_unrolled(RysIntEnvVars *envs, JKMatrix *jk, BoundsInfo *bounds,
     int buflen = nroots*2 * nsq_per_block + iprim*jprim + 3;
     switch (ijkl) {
     case 0: // (0, 0, 0, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0000); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0000); break;
     case 5: // (0, 0, 1, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0010); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0010); break;
     case 6: // (0, 0, 1, 1)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0011); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0011); break;
     case 10: // (0, 0, 2, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0020); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0020); break;
     case 11: // (0, 0, 2, 1)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0021); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0021); break;
     case 12: // (0, 0, 2, 2)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0022); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0022); break;
     case 25: // (0, 1, 0, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0100); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0100); break;
     case 30: // (0, 1, 1, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0110); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0110); break;
     case 31: // (0, 1, 1, 1)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0111); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0111); break;
     case 35: // (0, 1, 2, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0120); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0120); break;
     case 36: // (0, 1, 2, 1)
         buflen = 5760 + iprim * jprim + 3;
         LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0121); break;
     case 50: // (0, 2, 0, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0200); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0200); break;
     case 55: // (0, 2, 1, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0210); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0210); break;
     case 56: // (0, 2, 1, 1)
         buflen = 5760 + iprim * jprim + 3;
         LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0211); break;
     case 60: // (0, 2, 2, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_0220); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_0220); break;
     case 125: // (1, 0, 0, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1000); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_1000); break;
     case 130: // (1, 0, 1, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1010); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_1010); break;
     case 131: // (1, 0, 1, 1)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1011); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_1011); break;
     case 135: // (1, 0, 2, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1020); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_1020); break;
     case 136: // (1, 0, 2, 1)
         buflen = 4608 + iprim * jprim + 3;
         LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1021); break;
     case 150: // (1, 1, 0, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1100); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_1100); break;
     case 155: // (1, 1, 1, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1110); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_1110); break;
     case 156: // (1, 1, 1, 1)
         buflen = 5760 + iprim * jprim + 3;
         LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1111); break;
@@ -33616,26 +33595,26 @@ int rys_vjk_ip1_unrolled(RysIntEnvVars *envs, JKMatrix *jk, BoundsInfo *bounds,
         buflen = 4608 + iprim * jprim + 3;
         LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1120); break;
     case 175: // (1, 2, 0, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1200); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_1200); break;
     case 180: // (1, 2, 1, 0)
         buflen = 4608 + iprim * jprim + 3;
         LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_1210); break;
     case 250: // (2, 0, 0, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_2000); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_2000); break;
     case 255: // (2, 0, 1, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_2010); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_2010); break;
     case 256: // (2, 0, 1, 1)
         buflen = 4224 + iprim * jprim + 3;
         LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_2011); break;
     case 260: // (2, 0, 2, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_2020); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_2020); break;
     case 275: // (2, 1, 0, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_2100); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_2100); break;
     case 280: // (2, 1, 1, 0)
         buflen = 4224 + iprim * jprim + 3;
         LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_2110); break;
     case 300: // (2, 2, 0, 0)
-        LAUNCH_JKMATRIX_KERNEL(rys_vjk_ip1_2200); break;
+        LAUNCH_JKMATRIX_KERNEL_PERSISTENT(rys_vjk_ip1_2200); break;
     default: return 0;
     }
     return 1;

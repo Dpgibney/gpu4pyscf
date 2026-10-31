@@ -390,7 +390,7 @@ int RYS_build_jk(double *vj, double *vk, double *dm, int n_dm, int nao,
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     int workers = prop.multiProcessorCount;
-    int *head = (int *)(pool + workers * QUEUE_DEPTH);
+    int *head = (int *)(pool + POOL_BLOCKS_PER_SM * workers * QUEUE_DEPTH);
     cudaMemset(head, 0, sizeof(int)*3);
 
     JKMatrix jk = {vj, vk, dm, n_dm, 0, omega, lr_factor, sr_factor};

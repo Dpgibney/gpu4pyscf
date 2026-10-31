@@ -11,7 +11,7 @@ __global__ static
 void rys_ejk_ip2_type3_0000(JKENERGY_KERNEL_ARGS)
 {
     JKENERGY_KERNEL_SETUP();
-    constexpr int nsq_per_block = 256;
+    constexpr int nsq_per_block = 128;
     constexpr int gout_stride = 1;
     int t_id = gout_id * nsq_per_block + sq_id;
     int threads = nsq_per_block * gout_stride;
@@ -419,7 +419,7 @@ __global__ static
 void rys_ejk_ip2_type3_1000(JKENERGY_KERNEL_ARGS)
 {
     JKENERGY_KERNEL_SETUP();
-    constexpr int nsq_per_block = 256;
+    constexpr int nsq_per_block = 128;
     constexpr int gout_stride = 1;
     int t_id = gout_id * nsq_per_block + sq_id;
     int threads = nsq_per_block * gout_stride;
@@ -1056,7 +1056,7 @@ __global__ static
 void rys_ejk_ip2_type3_1010(JKENERGY_KERNEL_ARGS)
 {
     JKENERGY_KERNEL_SETUP();
-    constexpr int nsq_per_block = 256;
+    constexpr int nsq_per_block = 128;
     constexpr int gout_stride = 1;
     int t_id = gout_id * nsq_per_block + sq_id;
     int threads = nsq_per_block * gout_stride;
@@ -4996,7 +4996,7 @@ __global__ static
 void rys_ejk_ip2_type3_1100(JKENERGY_KERNEL_ARGS)
 {
     JKENERGY_KERNEL_SETUP();
-    constexpr int nsq_per_block = 256;
+    constexpr int nsq_per_block = 128;
     constexpr int gout_stride = 1;
     int t_id = gout_id * nsq_per_block + sq_id;
     int threads = nsq_per_block * gout_stride;
@@ -15611,25 +15611,21 @@ int rys_ejk_ip2_type3_unrolled(RysIntEnvVars *envs, JKEnergy *jk, BoundsInfo *bo
     int ll = bounds->ll;
     int ijkl = li*125 + lj*25 + lk*5 + ll;
     int nroots = bounds->nroots;
-    int nsq_per_block = 256;
+    int nsq_per_block = 128;
     int gout_stride = 1;
 
     switch (ijkl) {
     case 0: // (0, 0, 0, 0)
-        adjust_threads(rys_ejk_ip2_type3_0000, nsq_per_block);
         break;
     case 125: // (1, 0, 0, 0)
-        adjust_threads(rys_ejk_ip2_type3_1000, nsq_per_block);
         break;
     case 130: // (1, 0, 1, 0)
-        adjust_threads(rys_ejk_ip2_type3_1010, nsq_per_block);
         break;
     case 131: // (1, 0, 1, 1)
         nsq_per_block = 64;
         gout_stride = 4;
         break;
     case 150: // (1, 1, 0, 0)
-        adjust_threads(rys_ejk_ip2_type3_1100, nsq_per_block);
         break;
     case 155: // (1, 1, 1, 0)
         nsq_per_block = 64;
@@ -15647,16 +15643,16 @@ int rys_ejk_ip2_type3_unrolled(RysIntEnvVars *envs, JKEnergy *jk, BoundsInfo *bo
     int buflen = nroots*2 * nsq_per_block + iprim*jprim;
     switch (ijkl) {
     case 0: // (0, 0, 0, 0)
-        LAUNCH_JKENERGY_KERNEL(rys_ejk_ip2_type3_0000); break;
+        LAUNCH_JKENERGY_KERNEL_PERSISTENT(rys_ejk_ip2_type3_0000); break;
     case 125: // (1, 0, 0, 0)
-        LAUNCH_JKENERGY_KERNEL(rys_ejk_ip2_type3_1000); break;
+        LAUNCH_JKENERGY_KERNEL_PERSISTENT(rys_ejk_ip2_type3_1000); break;
     case 130: // (1, 0, 1, 0)
-        LAUNCH_JKENERGY_KERNEL(rys_ejk_ip2_type3_1010); break;
+        LAUNCH_JKENERGY_KERNEL_PERSISTENT(rys_ejk_ip2_type3_1010); break;
     case 131: // (1, 0, 1, 1)
         buflen = 4608 + iprim * jprim;
         LAUNCH_JKENERGY_KERNEL(rys_ejk_ip2_type3_1011); break;
     case 150: // (1, 1, 0, 0)
-        LAUNCH_JKENERGY_KERNEL(rys_ejk_ip2_type3_1100); break;
+        LAUNCH_JKENERGY_KERNEL_PERSISTENT(rys_ejk_ip2_type3_1100); break;
     case 155: // (1, 1, 1, 0)
         buflen = 4608 + iprim * jprim;
         LAUNCH_JKENERGY_KERNEL(rys_ejk_ip2_type3_1110); break;
