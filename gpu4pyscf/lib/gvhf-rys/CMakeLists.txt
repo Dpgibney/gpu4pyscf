@@ -11,7 +11,10 @@ add_library(gvhf_rys SHARED
   generated_ejk_ip1_1.cu
   generated_ejk_ip1_2.cu
   generated_ejk_ip1_3.cu
-  rys_contract_jk_ip2.cu unrolled_ejk_ip2_type12.cu unrolled_ejk_ip2_type3.cu
+  rys_contract_jk_ip2.cu unrolled_ejk_ip2_type12.cu unrolled_ejk_ip2_type3.cu generated_ejk_ip2.cu
+  generated_ejk_ip2_1.cu
+  generated_ejk_ip2_2.cu
+  generated_ejk_ip2_3.cu
   contract_int3c2e.cu
   mole_helper.cu
   ejk_int3c2e_ip1.cu fill_int3c2e.cu

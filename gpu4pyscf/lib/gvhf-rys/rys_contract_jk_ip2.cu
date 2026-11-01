@@ -1194,10 +1194,18 @@ while (1) {
 }
 }
 
+extern int rys_ejk_ip2_type12_generated(RysIntEnvVars *envs, JKEnergy *jk, BoundsInfo *bounds,
+                                        float *q_cond_ij, float *q_cond_kl, float dm_penalty,
+                                        float *s_cond_ij, float *s_cond_kl, float *diffuse_exps,
+                                        uint32_t *pool, double *dd_pool, int *head, int workers);
 extern int rys_ejk_ip2_type12_unrolled(RysIntEnvVars *envs, JKEnergy *jk, BoundsInfo *bounds,
                         float *q_cond_ij, float *q_cond_kl, float dm_penalty,
                         float *s_cond_ij, float *s_cond_kl, float *diffuse_exps,
                         uint32_t *pool, double *dd_pool, int *head, int workers);
+extern int rys_ejk_ip2_type3_generated(RysIntEnvVars *envs, JKEnergy *jk, BoundsInfo *bounds,
+                                       float *q_cond_ij, float *q_cond_kl, float dm_penalty,
+                                       float *s_cond_ij, float *s_cond_kl, float *diffuse_exps,
+                                       uint32_t *pool, double *dd_pool, int *head, int workers);
 extern int rys_ejk_ip2_type3_unrolled(RysIntEnvVars *envs, JKEnergy *jk, BoundsInfo *bounds,
                         float *q_cond_ij, float *q_cond_kl, float dm_penalty,
                         float *s_cond_ij, float *s_cond_kl, float *diffuse_exps,
@@ -1259,7 +1267,9 @@ int RYS_per_atom_jk_ip2_type12(double *ejk, double j_factor, double k_factor,
     int *head = (int *)(pool + POOL_BLOCKS_PER_SM * workers * QUEUE_DEPTH);
     cudaMemset(head, 0, sizeof(int));
 
-    if (!rys_ejk_ip2_type12_unrolled(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
+    if (!rys_ejk_ip2_type12_generated(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
+                                      s_cond_ij, s_cond_kl, diffuse_exps, pool, dd_pool, head, workers) &&
+        !rys_ejk_ip2_type12_unrolled(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
                                      s_cond_ij, s_cond_kl, diffuse_exps, pool, dd_pool, head, workers)) {
         int nf = nfi * nfj * nfk * nfl;
         int quartets_per_block = scheme[0];
@@ -1350,7 +1360,9 @@ int RYS_per_atom_jk_ip2_type3(double *ejk, double j_factor, double k_factor,
     int *head = (int *)(pool + POOL_BLOCKS_PER_SM * workers * QUEUE_DEPTH);
     cudaMemset(head, 0, sizeof(int));
 
-    if (!rys_ejk_ip2_type3_unrolled(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
+    if (!rys_ejk_ip2_type3_generated(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
+                                     s_cond_ij, s_cond_kl, diffuse_exps, pool, dd_pool, head, workers) &&
+        !rys_ejk_ip2_type3_unrolled(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
                                     s_cond_ij, s_cond_kl, diffuse_exps, pool, dd_pool, head, workers)) {
         int nf = nfi * nfj * nfk * nfl;
         int quartets_per_block = scheme[0];
