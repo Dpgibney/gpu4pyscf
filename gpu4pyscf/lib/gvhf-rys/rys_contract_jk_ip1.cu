@@ -1651,6 +1651,10 @@ extern int rys_vjk_ip1_unrolled(RysIntEnvVars *envs, JKMatrix *jk, BoundsInfo *b
                                 float *s_cond_ij, float *s_cond_kl, float *diffuse_exps,
                                 uint32_t *pool, int *head, int workers);
 
+extern int rys_ejk_ip1_generated(RysIntEnvVars *envs, JKEnergy *jk, BoundsInfo *bounds,
+                                 float *q_cond_ij, float *q_cond_kl, float dm_penalty,
+                                 float *s_cond_ij, float *s_cond_kl, float *diffuse_exps,
+                                 uint32_t *pool, double *dd_pool, int *head, int workers);
 extern int rys_ejk_ip1_unrolled(RysIntEnvVars *envs, JKEnergy *jk, BoundsInfo *bounds,
                                 float *q_cond_ij, float *q_cond_kl, float dm_penalty,
                                 float *s_cond_ij, float *s_cond_kl, float *diffuse_exps,
@@ -1800,7 +1804,9 @@ int RYS_per_atom_jk_ip1(double *ejk, double j_factor, double k_factor,
     int *head = (int *)(pool + POOL_BLOCKS_PER_SM * workers * QUEUE_DEPTH);
     cudaMemset(head, 0, sizeof(int));
 
-    if (!rys_ejk_ip1_unrolled(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
+    if (!rys_ejk_ip1_generated(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
+                               s_cond_ij, s_cond_kl, diffuse_exps, pool, dd_pool, head, workers) &&
+        !rys_ejk_ip1_unrolled(&envs, &jk, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
                               s_cond_ij, s_cond_kl, diffuse_exps, pool, dd_pool, head, workers)) {
         int nf = nfi * nfj * nfk * nfl;
         int quartets_per_block = scheme[0];
