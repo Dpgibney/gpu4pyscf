@@ -3501,7 +3501,16 @@ def _nr_rks_fxc_mo_task(ni, mol, grids, xc_code, fxc, mo_coeff, mo1, mocc,
         _sorted_mol = opt.mol
         nao = mol.nao
         nset = mo1.shape[0]
-        vmat = cupy.zeros((nset, nao, nao))
+        nocc = mocc.shape[1]
+        # The response is needed in the MO basis, C^T V C_occ, so each grid block adds
+        # its part of V C_occ directly: GEMMs of nao_sub x nocc per density instead of
+        # nao_sub x nao_sub. Blocks whose screened AOs are too few for that to pay off
+        # (gemms_mo * nocc >= gemms_ao * nao_sub, GEMMs per density) build V as before.
+        if xctype == 'NLC':
+            raise NotImplementedError('NLC')
+        vmo = cupy.zeros((nset, nao, nocc))
+        vmat = None
+        gemms_mo, gemms_ao = {'LDA': (1, 1), 'GGA': (2, 1)}.get(xctype, (5, 4))
 
         if xctype in ['LDA', 'HF']:
             ao_deriv = 0
@@ -3543,32 +3552,69 @@ def _nr_rks_fxc_mo_task(ni, mol, grids, xc_code, fxc, mo_coeff, mo1, mocc,
             fxc_w = cupy.ndarray((ncomp, ncomp, blk_size), memptr=fxc_w_buf.data)
             fxc_w = cupy.multiply(fxc[:,:,p0:p1], weights, out=fxc_w)
             wv = contract('axg,xyg->ayg', rho1, fxc_w)
+            rho1 = None
+            if xctype != 'LDA':
+                wv[:,0] *= .5
+            if xctype == 'MGGA':
+                wv[:,4] *= .5
 
-            for i in range(nset):
+            if gemms_mo * nocc < gemms_ao * nao_sub:
                 if xctype == 'LDA':
-                    aow = numint._scale_ao(ao, wv[i][0], out=buf)
-                    add_sparse(vmat[i], ao.dot(aow.T, out=vtmp), mask)
-                    # vmat_tmp = ao.dot(numint._scale_ao(ao, wv[i][0]).T)
-                elif xctype == 'GGA':
-                    wv[i,0] *= .5
-                    aow = numint._scale_ao(ao, wv[i], out=buf)
-                    add_sparse(vmat[i], ao[0].dot(aow.T, out=vtmp), mask)
-                elif xctype == 'NLC':
-                    raise NotImplementedError('NLC')
+                    psi = contract('io,ig->og', occ_coeff_mask, ao)
                 else:
-                    wv[i,0] *= .5
-                    wv[i,4] *= .5
-                    vtmp = numint._tau_dot(ao, ao, wv[i,4], buf=buf, out=vtmp)
-                    aow = numint._scale_ao(ao[:4], wv[i,:4], out=buf)
-                    vtmp = contract('ig, jg->ij', ao[0], aow, beta=1, out=vtmp) # ao[0].dot(aow.T, out=vtmp)
-                    add_sparse(vmat[i], vtmp, mask)
+                    psi = contract('nig,io->nog', ao, occ_coeff_mask)
+                # densities per batch: about 256 MB of intermediates
+                nbatch = max(1, int(2**25 / (blk_size*(nao_sub+2*nocc) + nao_sub*nocc)))
+                for i0 in range(0, nset, nbatch):
+                    i1 = min(i0 + nbatch, nset)
+                    nb = i1 - i0
+                    # GEMMs in the layouts cuBLAS takes directly: v1 is (nao_sub, nb*nocc),
+                    # v2 is (nb*nao_sub, nocc)
+                    if xctype == 'LDA':
+                        v1 = ao.dot((wv[i0:i1,0,None] * psi).reshape(nb*nocc, blk_size).T)
+                        v2 = v1.reshape(nao_sub, nb, nocc).transpose(1, 0, 2)
+                    else:
+                        # V = A + A^T (+ the meta-GGA tau term, symmetric) with
+                        # A = ao[0] (sum_k wv[k] ao[k])^T
+                        wvi = cupy.ascontiguousarray(wv[i0:i1,:4])
+                        x = contract('ang,nog->aog', wvi, psi[:4])
+                        v1 = ao[0].dot(x.reshape(nb*nocc, blk_size).T)
+                        x = None
+                        if xctype == 'MGGA':
+                            for k in range(1, 4):
+                                v1 += ao[k].dot((wv[i0:i1,4,None] * psi[k]).reshape(nb*nocc, blk_size).T)
+                        aow = contract('ang,nig->aig', wvi, ao[:4])
+                        v2 = aow.reshape(nb*nao_sub, blk_size).dot(psi[0].T).reshape(nb, nao_sub, nocc)
+                        aow = None
+                        v2 += v1.reshape(nao_sub, nb, nocc).transpose(1, 0, 2)
+                    vmo[i0:i1,mask] += v2
+                    v1 = v2 = None
+                psi = None
+            else:
+                if vmat is None:
+                    vmat = cupy.zeros((nset, nao, nao))
+                for i in range(nset):
+                    if xctype == 'LDA':
+                        aow = numint._scale_ao(ao, wv[i][0], out=buf)
+                        add_sparse(vmat[i], ao.dot(aow.T, out=vtmp), mask)
+                    elif xctype == 'GGA':
+                        aow = numint._scale_ao(ao, wv[i], out=buf)
+                        add_sparse(vmat[i], ao[0].dot(aow.T, out=vtmp), mask)
+                    else:
+                        vtmp = numint._tau_dot(ao, ao, wv[i,4], buf=buf, out=vtmp)
+                        aow = numint._scale_ao(ao[:4], wv[i,:4], out=buf)
+                        vtmp = contract('ig, jg->ij', ao[0], aow, beta=1, out=vtmp) # ao[0].dot(aow.T, out=vtmp)
+                        add_sparse(vmat[i], vtmp, mask)
 
             t1 = log.timer_debug2('integration', *t1)
-            ao = rho1 = None
+            ao = wv = None
         t0 = log.timer_debug1(f'vxc on Device {device_id} ', *t0)
-        if xctype != 'LDA':
-            transpose_sum(vmat)
-        vmat = _ao2mo(vmat, mocc, mo_coeff)
+        if vmat is not None:
+            if xctype != 'LDA':
+                transpose_sum(vmat)
+            vmo += contract('nij,jo->nio', vmat, mocc)
+            vmat = None
+        vmat = contract('nio,ip->npo', vmo, mo_coeff)
     return vmat
 
 def nr_rks_fxc_mo(ni, mol, grids, xc_code, dm0=None, dms=None, mo_coeff=None, relativity=0, hermi=0,
