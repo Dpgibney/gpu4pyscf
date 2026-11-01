@@ -259,7 +259,6 @@ while (1) {
                         gx[nsq_per_block*g_size*2] = rw[(irys*2+1)*nsq_per_block];
                     }
                     double rt = rw[irys*2*nsq_per_block];
-                    double aij = aij_cache[0];
                     double rt_aa = rt / (aij + akl);
                     double s0x, s1x, s2x;
 
@@ -270,12 +269,11 @@ while (1) {
                     //    for i in range(lij+1):
                     //        trr(i,k+1) = c0p * trr(i,k) + k*b01 * trr(i,k-1) + i*b00 * trr(i-1,k)
                     if (lij > 0) {
-                        double aj_aij = aij_cache[1];
                         double rt_aij = rt_aa * akl;
                         double b10 = .5/aij * (1 - rt_aij);
                         __syncthreads();
                         // gx(0,n+1) = c0*gx(0,n) + n*b10*gx(0,n-1)
-                        for (int n = gout_id; n < 3; n += gout_stride) {
+                        for (int n = gout_id; n < 3 && task_id < ntasks; n += gout_stride) {
                             double *_gx = gx + n * g_size * nsq_per_block;
                             double Rpa = (rjri[n]) * aj_aij;
                             double c0x = Rpa - rt_aij * Rpq[n*nsq_per_block];
@@ -305,7 +303,7 @@ while (1) {
                             double cpx = Rqc + rt_akl * Rpq[_ix*nsq_per_block];
                             //for i in range(lij+1):
                             //    trr(i,1) = c0p * trr(i,0) + i*b00 * trr(i-1,0)
-                            if (n < lij3) {
+                            if (n < lij3 && task_id < ntasks) {
                                 s0x = _gx[0];
                                 s1x = cpx * s0x;
                                 if (i > 0) {
@@ -319,7 +317,7 @@ while (1) {
                             //        trr(i,k+1) = cp * trr(i,k) + k*b01 * trr(i,k-1) + i*b00 * trr(i-1,k)
                             for (int k = 1; k < lkl; ++k) {
                                 __syncthreads();
-                                if (n < lij3) {
+                                if (n < lij3 && task_id < ntasks) {
                                     s2x = cpx*s1x + k*b01*s0x;
                                     if (i > 0) {
                                         s2x += i * b00 * _gx[(k*stride_k-1)*nsq_per_block];

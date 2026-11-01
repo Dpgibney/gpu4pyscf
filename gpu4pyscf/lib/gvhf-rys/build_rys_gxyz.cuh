@@ -22,15 +22,13 @@
             gx[gx_len*2] = rw[(irys*2+1)*nsq_per_block]; \
         } \
         double rt = rw[irys*2*nsq_per_block]; \
-        double aij = aij_cache[0]; \
         double rt_aa = rt / (aij + akl); \
         double s0x, s1x, s2x; \
         if (lij > 0) { \
-            double aj_aij = aij_cache[1]; \
             double rt_aij = rt_aa * akl; \
             double b10 = .5/aij * (1 - rt_aij); \
             __syncthreads(); \
-            for (int n = gout_id; n < 3; n += gout_stride) { \
+            for (int n = gout_id; n < 3 && (active); n += gout_stride) { \
                 double *_gx = gx + n * gx_len; \
                 double Rpa = rjri[n] * aj_aij; \
                 double c0x = Rpa - rt_aij * Rpq[n*nsq_per_block]; \
@@ -57,7 +55,7 @@
                 double *_gx = gx + (i + _ix * g_size) * nsq_per_block; \
                 double Rqc = rlrk[_ix*nsq_per_block] * al_akl; \
                 double cpx = Rqc + rt_akl * Rpq[_ix*nsq_per_block]; \
-                if (n < lij3) { \
+                if (n < lij3 && (active)) { \
                     s0x = _gx[0]; \
                     s1x = cpx * s0x; \
                     if (i > 0) { \
@@ -67,7 +65,7 @@
                 } \
                 for (int k = 1; k < lkl; ++k) { \
                     __syncthreads(); \
-                    if (n < lij3) { \
+                    if (n < lij3 && (active)) { \
                         s2x = cpx*s1x + k*b01*s0x; \
                         if (i > 0) { \
                             s2x += i * b00 * _gx[(k*stride_k-1)*nsq_per_block]; \
