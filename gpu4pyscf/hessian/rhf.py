@@ -29,6 +29,7 @@ from gpu4pyscf.gto.ecp import get_ecp_ip, get_ecp_ipip
 from gpu4pyscf.scf import cphf, j_engine
 from gpu4pyscf.lib.cupy_helper import (
     contract, tag_array, transpose_sum, get_avail_mem, condense, krylov)
+from gpu4pyscf import __config__
 from gpu4pyscf.__config__ import props as gpu_specs
 from gpu4pyscf.__config__ import num_devices
 from gpu4pyscf.lib import logger
@@ -50,6 +51,8 @@ libvhf_rys.RYS_build_jk_ip1.restype = ctypes.c_int
 GB = 1024*1024*1024
 ALIGNED = 4
 DD_CACHE_MAX = rhf_grad.DD_CACHE_MAX
+# J and K of the CPHF densities in one pass of the Rys J+K kernels (_get_jk_mo)
+JK_MO_ONE_PASS = getattr(__config__, 'hessian_rhf_jk_mo_one_pass', True)
 
 def hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
               mo1=None, mo_e1=None, h1mo=None,
@@ -863,6 +866,22 @@ def _get_jk_mo(hessobj, mol, dms, mo_coeff, mo_occ,
     nao = dms.shape[-1]
     dms = dms.reshape(-1,nao,nao)
     n_dm = len(dms)
+    if (with_j and with_k and JK_MO_ONE_PASS and
+        omega == 0 and lr_factor == 1 and sr_factor == 1):
+        # The Rys J+K kernels evaluate each integral once for all densities. The
+        # J-engine evaluates its integrals again for every block of 8 densities,
+        # and the CPHF solver passes 3*natm of them.
+        if omega not in mf._opt_gpu:
+            with mol.with_range_coulomb(omega):
+                mf._opt_gpu[omega] = _VHFOpt(mol, mf.direct_scf_tol).build()
+        kopt = mf._opt_gpu[omega]
+        _dms = kopt.apply_coeff_C_mat_CT(dms)
+        vj, vk = kopt.get_jk(_dms, hermi, mf.verbose)
+        _mo_coeff = kopt.apply_coeff_C_mat(mo_coeff)
+        _mocc = _mo_coeff[:,mo_occ>0.5]
+        vj = _ao2mo(vj, _mocc, _mo_coeff).reshape(n_dm,-1)
+        vk = _ao2mo(vk, _mocc, _mo_coeff).reshape(n_dm,-1)
+        return vj, vk
     # When hessian obj is converted from CPU instance, _opt_jengine and _opt_gpu
     # might not be initialized
     if with_j:

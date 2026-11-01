@@ -377,6 +377,28 @@ def _get_jk_mo(hessobj, mol, dms, mo_coeff, mo_occ,
     dms = dms.reshape(-1,nao,nao)
     n_dm = len(dms)
     n_dm_2 = n_dm // 2
+    if (with_j and with_k and rhf_hess_gpu.JK_MO_ONE_PASS and
+        omega == 0 and lr_factor == 1 and sr_factor == 1):
+        # In one pass of the Rys J+K kernels (see hessian.rhf._get_jk_mo); J of
+        # each spin density, summed over the two spins
+        if omega not in mf._opt_gpu:
+            with mol.with_range_coulomb(omega):
+                mf._opt_gpu[omega] = _VHFOpt(mol, mf.direct_scf_tol).build()
+        kopt = mf._opt_gpu[omega]
+        _dms = kopt.apply_coeff_C_mat_CT(dms)
+        vj, vk = kopt.get_jk(_dms, hermi, mf.verbose)
+        vjab = vj[:n_dm_2] + vj[n_dm_2:]
+        moa = kopt.apply_coeff_C_mat(mo_coeff[0])
+        mob = kopt.apply_coeff_C_mat(mo_coeff[1])
+        mocca = moa[:,mo_occ[0]>0.5]
+        moccb = mob[:,mo_occ[1]>0.5]
+        vja = _ao2mo(vjab, mocca, moa).reshape(n_dm_2,-1)
+        vjb = _ao2mo(vjab, moccb, mob).reshape(n_dm_2,-1)
+        vj = cp.hstack((vja, vjb))
+        vka = _ao2mo(vk[:n_dm_2], mocca, moa).reshape(n_dm_2,-1)
+        vkb = _ao2mo(vk[n_dm_2:], moccb, mob).reshape(n_dm_2,-1)
+        vk = cp.hstack((vka, vkb))
+        return vj, vk
     if with_j:
         if omega not in mf._opt_jengine:
             mf._opt_jengine[omega] = j_engine._VHFOpt(mol, mf.direct_scf_tol).build()
