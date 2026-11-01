@@ -396,17 +396,28 @@ def _d1d2_dot_(vmat, mol, ao1, ao2, mask, ao_loc, dR1_on_bra=True):
                 contract('ik,lk->il', ao1[d2], ao2[d1], beta=1, out=vmat[d1,d2])
         #vmat += contract('yig,xjg->xyij', ao1, ao2)
 
+def _d1d2_dot_gemm(aow, ao1):
+    '''The nine products of _d1d2_dot_ (dR1_on_bra=False) in one GEMM:
+    v[(y,i),(x,l)] = sum_g aow[y,i,g] ao1[x,l,g], as (3*nao, 3*nao)'''
+    nao, ngrids = aow.shape[1:]
+    return aow.reshape(3*nao, ngrids).dot(ao1.reshape(3*nao, ngrids).T)
+
+def _add_d1d2_(ipip, v, idx):
+    '''ipip[x,y][idx[:,None],idx] += v[(y,i),(x,l)] for v of _d1d2_dot_gemm'''
+    n = len(idx)
+    add_sparse(ipip, v.reshape(3,n,3,n).transpose(2,0,1,3), idx)
+
 def _get_vxc_deriv2_task(hessobj, grids, mo_coeff, mo_occ, max_memory, device_id=0, verbose=0):
     mol = hessobj.mol
     mf = hessobj.base
     ni = mf._numint
     nao = mol.nao
+    natm = mol.natm
     opt = ni.gdftopt
 
     _sorted_mol = opt._sorted_mol
     xctype = ni._xc_type(mf.xc)
     aoslices = mol.aoslice_by_atom()
-    ao_loc = mol.ao_loc_nr()
 
     ngrids_glob = grids.coords.shape[0]
     grid_start, grid_end = numint.gen_grid_range(ngrids_glob, device_id)
@@ -417,12 +428,13 @@ def _get_vxc_deriv2_task(hessobj, grids, mo_coeff, mo_occ, max_memory, device_id
         mo_occ = cupy.asarray(mo_occ)
         mo_coeff = cupy.asarray(mo_coeff)
         dm0 = mf.make_rdm1(mo_coeff, mo_occ)
-        dm0_sorted = opt.sort_orbitals(dm0, axis=[0,1])
-        coeff = cupy.asarray(opt.coeff)
+        # Each grid block works on its own AOs in the original basis (_block_ao_subset),
+        # and atoms without AOs on the block, whose dR_rho1 is zero, are skipped.
+        ao_idx = cupy.asarray(opt._ao_idx)
         mocc = mo_coeff[:,mo_occ>0]
         nocc = mocc.shape[1]
 
-        vmat_dm = cupy.zeros((_sorted_mol.natm,3,3,nao))
+        vmat_dm = cupy.zeros((natm,3,3,nao))
         ipip = cupy.zeros((3,3,nao,nao))
 
         if xctype == 'LDA':
@@ -439,52 +451,48 @@ def _get_vxc_deriv2_task(hessobj, grids, mo_coeff, mo_occ, max_memory, device_id
             aow_buf = cupy.empty(max(3*nao,1*nocc)* MIN_BLK_SIZE)
             wv_buf = cupy.empty(3* MIN_BLK_SIZE)
             ao1_buf = cupy.empty(nd*nao*MIN_BLK_SIZE)
-            ao_dm_mask_buf = cupy.empty(4 * nao * MIN_BLK_SIZE)
             ao_dm0_buf = cupy.empty(nao * MIN_BLK_SIZE)
-            dm_mask_buf = cupy.empty(nao*nao)
 
             t1 = log.init_timer()
             for ao_mask, mask, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
                                                           grid_range=(grid_start, grid_end)):
-                nao_sub = len(mask)
                 blk_size = len(weight)
-                ao1 = cupy.ndarray((nd, nao, blk_size), memptr=ao1_buf.data)
+                order, idx, slices = _block_ao_subset(ao_idx, mask, aoslices)
+                nao_sub = len(idx)
+                if nao_sub == 0:
+                    continue
+                ao = cupy.ndarray((nd, nao_sub, blk_size), memptr=ao1_buf.data)
                 rho = cupy.ndarray((blk_size), memptr=rho_buf.data)
-                ao_dm_mask = cupy.ndarray((4, nao_sub, blk_size), memptr=ao_dm_mask_buf.data)
-                ao_dm0 = cupy.ndarray((nao, blk_size), memptr=ao_dm0_buf.data)
+                ao_dm0 = cupy.ndarray((nao_sub, blk_size), memptr=ao_dm0_buf.data)
                 wv = cupy.ndarray((3, blk_size), memptr=wv_buf.data)
 
-                ao1 = contract('nip,ij->njp', ao_mask, coeff[mask], out=ao1)
-
-                rho = numint.eval_rho2(_sorted_mol, ao1[0], mo_coeff, mo_occ, mask, xctype, buf=aow_buf, out=rho)
+                ao = cupy.take(ao_mask, order, axis=1, out=ao)
+                rho = numint.eval_rho2(_sorted_mol, ao[0], mo_coeff[idx], mo_occ, None, xctype, buf=aow_buf, out=rho)
                 t1 = log.timer_debug2('eval rho', *t1)
                 vxc, fxc = ni.eval_xc_eff(mf.xc, rho, 2, xctype=xctype, spin=0)[1:3]
                 t1 = log.timer_debug2('eval vxc', *t1)
                 wv1 = cupy.multiply(weight, vxc[0])
                 wf = cupy.multiply(weight, fxc[0,0])
-                aow  = cupy.ndarray((3, nao, blk_size), memptr=aow_buf.data)
+                aow  = cupy.ndarray((3, nao_sub, blk_size), memptr=aow_buf.data)
                 for i in range(1, 4):
-                    numint._scale_ao(ao1[i], wv1, out=aow[i-1])
-                _d1d2_dot_(ipip, mol, aow, ao1[1:4], mask, ao_loc, False)
-                dm_mask = dm_mask_buf[:nao_sub**2].reshape(nao_sub,nao_sub)
-                dm_mask = take_last2d(dm0_sorted, mask, out=dm_mask)
-                ao_dm_mask = contract('nig,ij->njg', ao_mask[:4], dm_mask, out=ao_dm_mask)
-                ao_dm0 = contract('ik,il->kl', dm0, ao1[0], out=ao_dm0)
-                aow = aow[:,:nao_sub]
-                for ia in range(_sorted_mol.natm):
-                    p0, p1 = aoslices[ia][2:]
+                    numint._scale_ao(ao[i], wv1, out=aow[i-1])
+                _add_d1d2_(ipip, _d1d2_dot_gemm(aow, ao[1:4]), idx)
+                ao_dm0 = contract('ik,il->kl', take_last2d(dm0, idx), ao[0], out=ao_dm0)
+                for ia in range(natm):
+                    p0, p1 = slices[ia][2:]
+                    if p0 == p1:
+                        continue
                     # *2 for \nabla|ket> in rho1
-                    wv = contract('xig,ig->xg', ao1[1:,p0:p1,:], ao_dm0[p0:p1,:], out=wv)
+                    wv = contract('xig,ig->xg', ao[1:,p0:p1,:], ao_dm0[p0:p1,:], out=wv)
                     wv *= 2
                     # aow ~ rho1 ~ d/dR1
                     wv = cupy.multiply(wf, wv)
                     for i in range(3):
-                        numint._scale_ao(ao_dm_mask[0], wv[i], out=aow[i])
-                    vmat_dm[ia][:,:,mask] += dot_rows(aow, ao_mask[1:4])
+                        numint._scale_ao(ao_dm0, wv[i], out=aow[i])
+                    vmat_dm[ia][:,:,idx] += dot_rows(aow, ao[1:4])
                 t1 = log.timer_debug2('integration', *t1)
 
-            vmat_dm = opt.unsort_orbitals(vmat_dm, axis=[3])
-            for ia in range(_sorted_mol.natm):
+            for ia in range(natm):
                 p0, p1 = aoslices[ia][2:]
                 contract('xypq,pq->xyp', ipip[:,:,:,p0:p1], dm0[:,p0:p1], beta=1, out=vmat_dm[ia])
         elif xctype == 'GGA':
@@ -494,55 +502,51 @@ def _get_vxc_deriv2_task(hessobj, grids, mo_coeff, mo_occ, max_memory, device_id
             aow_buf = cupy.empty(max(3*nao,2*nocc)* MIN_BLK_SIZE)
             wv_buf = cupy.empty(3* ncomp* MIN_BLK_SIZE)
             ao1_buf = cupy.empty(nd*nao*MIN_BLK_SIZE)
-            ao_dm_mask_buf = cupy.empty(4 * nao * MIN_BLK_SIZE)
             ao_dm0_buf = cupy.empty(4 * nao * MIN_BLK_SIZE)
-            dm_mask_buf = cupy.empty(nao*nao)
             vmat_dm_buf = cupy.empty(3*3*nao)
             dR_rho1_buf = cupy.empty(3*ncomp*MIN_BLK_SIZE)
             for ao_mask, mask, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
                                                           grid_range=(grid_start, grid_end)):
-                nao_sub = len(mask)
                 blk_size = len(weight)
-                ao1 = cupy.ndarray((nd, nao, blk_size), memptr=ao1_buf.data)
+                order, idx, slices = _block_ao_subset(ao_idx, mask, aoslices)
+                nao_sub = len(idx)
+                if nao_sub == 0:
+                    continue
+                ao = cupy.ndarray((nd, nao_sub, blk_size), memptr=ao1_buf.data)
                 rho = cupy.ndarray((ncomp, blk_size), memptr=rho_buf.data)
-
-                ao_dm_mask = cupy.ndarray((4, nao_sub, blk_size), memptr=ao_dm_mask_buf.data)
-                ao_dm0 = cupy.ndarray((4, nao, blk_size), memptr=ao_dm0_buf.data)
+                ao_dm0 = cupy.ndarray((4, nao_sub, blk_size), memptr=ao_dm0_buf.data)
                 wv = cupy.ndarray((3, ncomp, blk_size), memptr=wv_buf.data)
                 dR_rho1 =  cupy.ndarray((3, ncomp, blk_size), memptr=dR_rho1_buf.data)
                 vmat_dm_tmp = cupy.ndarray((3,3,nao_sub), memptr=vmat_dm_buf.data)
 
-                ao = contract('nip,ij->njp', ao_mask, coeff[mask], out=ao1)
-                rho = numint.eval_rho2(_sorted_mol, ao[:4], mo_coeff, mo_occ, mask, xctype, buf=aow_buf, out=rho)
+                ao = cupy.take(ao_mask, order, axis=1, out=ao)
+                rho = numint.eval_rho2(_sorted_mol, ao[:4], mo_coeff[idx], mo_occ, None, xctype, buf=aow_buf, out=rho)
                 t1 = log.timer_debug2('eval rho', *t1)
                 vxc, fxc = ni.eval_xc_eff(mf.xc, rho, 2, xctype=xctype, spin=0)[1:3]
                 t1 = log.timer_debug2('eval vxc', *t1)
                 wv1 = cupy.multiply(weight, vxc)
                 wf = cupy.multiply(weight, fxc)
                 wv1[0] *= .5
-                aow  = cupy.ndarray((3, nao, blk_size), memptr=aow_buf.data)
-                aow = rks_grad._make_dR_dao_w(ao, wv1, out=aow)
-                _d1d2_dot_(ipip, mol, aow, ao[1:4], mask, ao_loc, False)
-                contract('ki,nkl->nil', dm0, ao[:4], out=ao_dm0)
-                dm_mask = dm_mask_buf[:nao_sub**2].reshape(nao_sub,nao_sub)
-                dm_mask = take_last2d(dm0_sorted, mask, out=dm_mask)
-                ao_dm_mask = contract('nig,ij->njg', ao_mask[:4], dm_mask, out=ao_dm_mask)
                 aow  = cupy.ndarray((3, nao_sub, blk_size), memptr=aow_buf.data)
-                for ia in range(_sorted_mol.natm):
-                    dR_rho1 = _make_dR_rho1(ao, ao_dm0, ia, aoslices, xctype,
+                aow = rks_grad._make_dR_dao_w(ao, wv1, out=aow)
+                _add_d1d2_(ipip, _d1d2_dot_gemm(aow, ao[1:4]), idx)
+                ao_dm0 = contract('ik,pil->pkl', take_last2d(dm0, idx), ao[:4], out=ao_dm0)
+                for ia in range(natm):
+                    if slices[ia][2] == slices[ia][3]:
+                        continue
+                    dR_rho1 = _make_dR_rho1(ao, ao_dm0, ia, slices, xctype,
                                             buf=wv[0,0], out=dR_rho1)
                     wv = _contract_rho1_fxc(dR_rho1, wf)
                     wv[:,0] *= .5
                     for i in range(3):
-                        aow = rks_grad._make_dR_dao_w(ao_mask, wv[i], out=aow)
-                        dot_rows(aow, ao_dm_mask[0], out=vmat_dm_tmp[i])
+                        aow = rks_grad._make_dR_dao_w(ao, wv[i], out=aow)
+                        dot_rows(aow, ao_dm0[0], out=vmat_dm_tmp[i])
                     for i in range(3):
-                        numint._scale_ao(ao_dm_mask[:4], wv[i,:4], out=aow[i])
-                    vmat_dm_tmp = dot_rows(aow, ao_mask[1:4], out=vmat_dm_tmp, beta=1)
-                    vmat_dm[ia][:,:,mask] += vmat_dm_tmp
+                        numint._scale_ao(ao_dm0[:4], wv[i,:4], out=aow[i])
+                    vmat_dm_tmp = dot_rows(aow, ao[1:4], out=vmat_dm_tmp, beta=1)
+                    vmat_dm[ia][:,:,idx] += vmat_dm_tmp
                 t1 = log.timer_debug2('integration', *t1)
-            vmat_dm = opt.unsort_orbitals(vmat_dm, axis=[3])
-            for ia in range(_sorted_mol.natm):
+            for ia in range(natm):
                 p0, p1 = aoslices[ia][2:]
                 contract('xypq,pq->xyp', ipip[:,:,:,p0:p1], dm0[:,p0:p1], beta=1, out=vmat_dm[ia])
                 contract('yxqp,pq->xyp', ipip[:,:,p0:p1], dm0[:,p0:p1],  beta=1, out=vmat_dm[ia])
@@ -554,26 +558,28 @@ def _get_vxc_deriv2_task(hessobj, grids, mo_coeff, mo_occ, max_memory, device_id
             aow_buf = cupy.empty(max(6*nao,2*nocc)* MIN_BLK_SIZE)
             wv_buf = cupy.empty(3* ncomp* MIN_BLK_SIZE)
             ao1_buf = cupy.empty(nd*nao*MIN_BLK_SIZE)
-            ao_dm_mask_buf = cupy.empty(4 * nao * MIN_BLK_SIZE)
             ao_dm0_buf = cupy.empty(4 * nao * MIN_BLK_SIZE)
-            dm_mask_buf = cupy.empty(nao*nao)
             vmat_dm_buf = cupy.empty(3*3*nao)
             dR_rho1_buf = cupy.empty(3*ncomp*MIN_BLK_SIZE)
+            # the second derivatives d_k d_x AO for x = 0, 1, 2, for each k
+            d2_comps = [cupy.asarray(c) for c in ((XX, XY, XZ), (YX, YY, YZ), (ZX, ZY, ZZ))]
 
             for ao_mask, mask, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
                                                           grid_range=(grid_start, grid_end)):
-                nao_sub = len(mask)
                 blk_size = len(weight)
-                ao1 = cupy.ndarray((nd, nao, blk_size), memptr=ao1_buf.data)
+                order, idx, slices = _block_ao_subset(ao_idx, mask, aoslices)
+                nao_sub = len(idx)
+                if nao_sub == 0:
+                    continue
+                ao = cupy.ndarray((nd, nao_sub, blk_size), memptr=ao1_buf.data)
                 rho = cupy.ndarray((ncomp, blk_size), memptr=rho_buf.data)
-                ao_dm_mask = cupy.ndarray((4, nao_sub, blk_size), memptr=ao_dm_mask_buf.data)
-                ao_dm0 = cupy.ndarray((4, nao, blk_size), memptr=ao_dm0_buf.data)
+                ao_dm0 = cupy.ndarray((4, nao_sub, blk_size), memptr=ao_dm0_buf.data)
                 wv = cupy.ndarray((3, ncomp, blk_size), memptr=wv_buf.data)
                 dR_rho1 =  cupy.ndarray((3, ncomp, blk_size), memptr=dR_rho1_buf.data)
                 vmat_dm_tmp = cupy.ndarray((3,3,nao_sub), memptr=vmat_dm_buf.data)
 
-                ao = contract('nip,ij->njp', ao_mask, coeff[mask], out=ao1)
-                rho = numint.eval_rho2(_sorted_mol, ao[:10], mo_coeff, mo_occ, mask, xctype, buf=aow_buf, out=rho)
+                ao = cupy.take(ao_mask, order, axis=1, out=ao)
+                rho = numint.eval_rho2(_sorted_mol, ao[:10], mo_coeff[idx], mo_occ, None, xctype, buf=aow_buf, out=rho)
                 t1 = log.timer_debug2('eval rho', *t1)
                 vxc, fxc = ni.eval_xc_eff(mf.xc, rho, 2, xctype=xctype, spin=0)[1:3]
                 t1 = log.timer_debug2('eval vxc', *t1)
@@ -581,56 +587,55 @@ def _get_vxc_deriv2_task(hessobj, grids, mo_coeff, mo_occ, max_memory, device_id
                 wf = cupy.multiply(weight, fxc)
                 wv1[0] *= .5
                 wv1[4] *= .25
-                aow  = cupy.ndarray((3, nao, blk_size), memptr=aow_buf.data)
-                aow = rks_grad._make_dR_dao_w(ao, wv1, out=aow)
-                _d1d2_dot_(ipip, mol, aow, ao[1:4], mask, ao_loc, False)
-                aow  = cupy.ndarray((6, nao, blk_size), memptr=aow_buf.data)
-                for i in range(4,10):
-                    numint._scale_ao(ao[i], wv1[4], out=aow[i-4])
-                _d1d2_dot_(ipip, mol, [aow[0], aow[1], aow[2]], [ao[XX], ao[XY], ao[XZ]], mask, ao_loc, False)
-                _d1d2_dot_(ipip, mol, [aow[1], aow[3], aow[4]], [ao[YX], ao[YY], ao[YZ]], mask, ao_loc, False)
-                _d1d2_dot_(ipip, mol, [aow[2], aow[4], aow[5]], [ao[ZX], ao[ZY], ao[ZZ]], mask, ao_loc, False)
-                dm_mask = dm_mask_buf[:nao_sub**2].reshape(nao_sub,nao_sub)
-                dm_mask = take_last2d(dm0_sorted, mask, out=dm_mask)
-                contract('ki,nkl->nil', dm0, ao[:4], out=ao_dm0)
-                ao_dm_mask = contract('nig,ij->njg', ao_mask[:4], dm_mask, out=ao_dm_mask)
                 aow  = cupy.ndarray((3, nao_sub, blk_size), memptr=aow_buf.data)
-                for ia in range(_sorted_mol.natm):
-                    dR_rho1 = _make_dR_rho1(ao, ao_dm0, ia, aoslices, xctype,
+                aow = rks_grad._make_dR_dao_w(ao, wv1, out=aow)
+                v = _d1d2_dot_gemm(aow, ao[1:4])
+                d2ao = cupy.ndarray((3, nao_sub, blk_size), memptr=aow_buf.data)
+                aow = cupy.ndarray((3, nao_sub, blk_size), memptr=aow_buf[3*nao_sub*blk_size:].data)
+                for comps in d2_comps:
+                    d2ao = cupy.take(ao, comps, axis=0, out=d2ao)
+                    aow = cupy.multiply(d2ao, wv1[4], out=aow)
+                    v += _d1d2_dot_gemm(aow, d2ao)
+                _add_d1d2_(ipip, v, idx)
+                ao_dm0 = contract('ik,pil->pkl', take_last2d(dm0, idx), ao[:4], out=ao_dm0)
+                aow  = cupy.ndarray((3, nao_sub, blk_size), memptr=aow_buf.data)
+                for ia in range(natm):
+                    if slices[ia][2] == slices[ia][3]:
+                        continue
+                    dR_rho1 = _make_dR_rho1(ao, ao_dm0, ia, slices, xctype,
                                             buf=wv[0,0], out=dR_rho1)
                     wv = _contract_rho1_fxc(dR_rho1, wf)
                     wv[:,0] *= .5
                     wv[:,4] *= .5  # for the factor 1/2 in tau
                     for i in range(3):
-                        aow = rks_grad._make_dR_dao_w(ao_mask, wv[i], out=aow)
-                        dot_rows(aow, ao_dm_mask[0], out=vmat_dm_tmp[i])
+                        aow = rks_grad._make_dR_dao_w(ao, wv[i], out=aow)
+                        dot_rows(aow, ao_dm0[0], out=vmat_dm_tmp[i])
 
                     for i in range(3):
-                        numint._scale_ao(ao_dm_mask[:4], wv[i,:4], out=aow[i])
-                    dot_rows(aow, ao_mask[1:4], out=vmat_dm_tmp, beta=1)
+                        numint._scale_ao(ao_dm0[:4], wv[i,:4], out=aow[i])
+                    dot_rows(aow, ao[1:4], out=vmat_dm_tmp, beta=1)
 
                     for i in range(3):
-                        numint._scale_ao(ao_dm_mask[1], wv[i,4], out=aow[i])
-                    dot_rows(aow, ao_mask[XX], out=vmat_dm_tmp[:,0], beta=1)
-                    dot_rows(aow, ao_mask[XY], out=vmat_dm_tmp[:,1], beta=1)
-                    dot_rows(aow, ao_mask[XZ], out=vmat_dm_tmp[:,2], beta=1)
+                        numint._scale_ao(ao_dm0[1], wv[i,4], out=aow[i])
+                    dot_rows(aow, ao[XX], out=vmat_dm_tmp[:,0], beta=1)
+                    dot_rows(aow, ao[XY], out=vmat_dm_tmp[:,1], beta=1)
+                    dot_rows(aow, ao[XZ], out=vmat_dm_tmp[:,2], beta=1)
 
                     for i in range(3):
-                        numint._scale_ao(ao_dm_mask[2], wv[i,4], out=aow[i])
-                    dot_rows(aow, ao_mask[YX], out=vmat_dm_tmp[:,0], beta=1)
-                    dot_rows(aow, ao_mask[YY], out=vmat_dm_tmp[:,1], beta=1)
-                    dot_rows(aow, ao_mask[YZ], out=vmat_dm_tmp[:,2], beta=1)
+                        numint._scale_ao(ao_dm0[2], wv[i,4], out=aow[i])
+                    dot_rows(aow, ao[YX], out=vmat_dm_tmp[:,0], beta=1)
+                    dot_rows(aow, ao[YY], out=vmat_dm_tmp[:,1], beta=1)
+                    dot_rows(aow, ao[YZ], out=vmat_dm_tmp[:,2], beta=1)
 
                     for i in range(3):
-                        numint._scale_ao(ao_dm_mask[3], wv[i,4], out=aow[i])
-                    dot_rows(aow, ao_mask[ZX], out=vmat_dm_tmp[:,0], beta=1)
-                    dot_rows(aow, ao_mask[ZY], out=vmat_dm_tmp[:,1], beta=1)
-                    dot_rows(aow, ao_mask[ZZ], out=vmat_dm_tmp[:,2], beta=1)
+                        numint._scale_ao(ao_dm0[3], wv[i,4], out=aow[i])
+                    dot_rows(aow, ao[ZX], out=vmat_dm_tmp[:,0], beta=1)
+                    dot_rows(aow, ao[ZY], out=vmat_dm_tmp[:,1], beta=1)
+                    dot_rows(aow, ao[ZZ], out=vmat_dm_tmp[:,2], beta=1)
 
-                    vmat_dm[ia][:,:,mask] += vmat_dm_tmp
+                    vmat_dm[ia][:,:,idx] += vmat_dm_tmp
                 t1 = log.timer_debug2('integration', *t1)
-            vmat_dm = opt.unsort_orbitals(vmat_dm, axis=[3])
-            for ia in range(_sorted_mol.natm):
+            for ia in range(natm):
                 p0, p1 = aoslices[ia][2:]
                 contract('xypq,pq->xyp', ipip[:,:,:,p0:p1], dm0[:,p0:p1], beta=1, out=vmat_dm[ia])
                 contract('yxqp,pq->xyp', ipip[:,:,p0:p1], dm0[:,p0:p1], beta=1, out=vmat_dm[ia])
