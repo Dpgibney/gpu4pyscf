@@ -30,7 +30,7 @@ from gpu4pyscf.grad import rks as rks_grad
 from gpu4pyscf.dft import numint
 from gpu4pyscf.lib.cupy_helper import (
     contract, add_sparse, get_avail_mem, reduce_to_device, transpose_sum,
-    take_last2d, batched_vec_norm2)
+    take_last2d, batched_vec_norm2, dot_rows)
 from gpu4pyscf.lib import logger
 from gpu4pyscf.__config__ import num_devices, min_grid_blksize
 from gpu4pyscf.dft.numint import NLC_REMOVE_ZERO_RHO_GRID_THRESHOLD, _contract_rho1_fxc
@@ -480,7 +480,7 @@ def _get_vxc_deriv2_task(hessobj, grids, mo_coeff, mo_occ, max_memory, device_id
                     wv = cupy.multiply(wf, wv)
                     for i in range(3):
                         numint._scale_ao(ao_dm_mask[0], wv[i], out=aow[i])
-                    vmat_dm[ia][:,:,mask] += contract('yjg,xjg->xyj', ao_mask[1:4], aow)
+                    vmat_dm[ia][:,:,mask] += dot_rows(aow, ao_mask[1:4])
                 t1 = log.timer_debug2('integration', *t1)
 
             vmat_dm = opt.unsort_orbitals(vmat_dm, axis=[3])
@@ -535,10 +535,10 @@ def _get_vxc_deriv2_task(hessobj, grids, mo_coeff, mo_occ, max_memory, device_id
                     wv[:,0] *= .5
                     for i in range(3):
                         aow = rks_grad._make_dR_dao_w(ao_mask, wv[i], out=aow)
-                        contract('xjg,jg->xj', aow, ao_dm_mask[0], out=vmat_dm_tmp[i])
+                        dot_rows(aow, ao_dm_mask[0], out=vmat_dm_tmp[i])
                     for i in range(3):
                         numint._scale_ao(ao_dm_mask[:4], wv[i,:4], out=aow[i])
-                    vmat_dm_tmp = contract('yjg,xjg->xyj', ao_mask[1:4], aow, beta=1, out=vmat_dm_tmp)
+                    vmat_dm_tmp = dot_rows(aow, ao_mask[1:4], out=vmat_dm_tmp, beta=1)
                     vmat_dm[ia][:,:,mask] += vmat_dm_tmp
                 t1 = log.timer_debug2('integration', *t1)
             vmat_dm = opt.unsort_orbitals(vmat_dm, axis=[3])
@@ -603,29 +603,29 @@ def _get_vxc_deriv2_task(hessobj, grids, mo_coeff, mo_occ, max_memory, device_id
                     wv[:,4] *= .5  # for the factor 1/2 in tau
                     for i in range(3):
                         aow = rks_grad._make_dR_dao_w(ao_mask, wv[i], out=aow)
-                        contract('xjg,jg->xj', aow, ao_dm_mask[0], out=vmat_dm_tmp[i])
+                        dot_rows(aow, ao_dm_mask[0], out=vmat_dm_tmp[i])
 
                     for i in range(3):
                         numint._scale_ao(ao_dm_mask[:4], wv[i,:4], out=aow[i])
-                    contract('yjg,xjg->xyj', ao_mask[1:4], aow, beta=1, out=vmat_dm_tmp)
+                    dot_rows(aow, ao_mask[1:4], out=vmat_dm_tmp, beta=1)
 
                     for i in range(3):
                         numint._scale_ao(ao_dm_mask[1], wv[i,4], out=aow[i])
-                    contract('jg,xjg->xj', ao_mask[XX], aow, beta=1, out=vmat_dm_tmp[:,0])
-                    contract('jg,xjg->xj', ao_mask[XY], aow, beta=1, out=vmat_dm_tmp[:,1])
-                    contract('jg,xjg->xj', ao_mask[XZ], aow, beta=1, out=vmat_dm_tmp[:,2])
+                    dot_rows(aow, ao_mask[XX], out=vmat_dm_tmp[:,0], beta=1)
+                    dot_rows(aow, ao_mask[XY], out=vmat_dm_tmp[:,1], beta=1)
+                    dot_rows(aow, ao_mask[XZ], out=vmat_dm_tmp[:,2], beta=1)
 
                     for i in range(3):
                         numint._scale_ao(ao_dm_mask[2], wv[i,4], out=aow[i])
-                    contract('jg,xjg->xj', ao_mask[YX], aow, beta=1, out=vmat_dm_tmp[:,0])
-                    contract('jg,xjg->xj', ao_mask[YY], aow, beta=1, out=vmat_dm_tmp[:,1])
-                    contract('jg,xjg->xj', ao_mask[YZ], aow, beta=1, out=vmat_dm_tmp[:,2])
+                    dot_rows(aow, ao_mask[YX], out=vmat_dm_tmp[:,0], beta=1)
+                    dot_rows(aow, ao_mask[YY], out=vmat_dm_tmp[:,1], beta=1)
+                    dot_rows(aow, ao_mask[YZ], out=vmat_dm_tmp[:,2], beta=1)
 
                     for i in range(3):
                         numint._scale_ao(ao_dm_mask[3], wv[i,4], out=aow[i])
-                    contract('jg,xjg->xj', ao_mask[ZX], aow, beta=1, out=vmat_dm_tmp[:,0])
-                    contract('jg,xjg->xj', ao_mask[ZY], aow, beta=1, out=vmat_dm_tmp[:,1])
-                    contract('jg,xjg->xj', ao_mask[ZZ], aow, beta=1, out=vmat_dm_tmp[:,2])
+                    dot_rows(aow, ao_mask[ZX], out=vmat_dm_tmp[:,0], beta=1)
+                    dot_rows(aow, ao_mask[ZY], out=vmat_dm_tmp[:,1], beta=1)
+                    dot_rows(aow, ao_mask[ZZ], out=vmat_dm_tmp[:,2], beta=1)
 
                     vmat_dm[ia][:,:,mask] += vmat_dm_tmp
                 t1 = log.timer_debug2('integration', *t1)

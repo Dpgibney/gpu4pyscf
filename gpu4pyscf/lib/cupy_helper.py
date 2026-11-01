@@ -1206,6 +1206,92 @@ void ''' + fn_name + '''(double *out, double *a, int *loc_x, int *loc_y,
         out = out.T
     return out
 
+def dot_rows(a, b, out=None, beta=0.):
+    '''out[x,y,j] = beta*out[x,y,j] + sum_g a[x,j,g] * b[y,j,g], i.e.
+    contract('xjg,yjg->xyj', a, b): the dot products along the last axis of the
+    rows j of a and b. b may be 2D, b[j,g], for out[x,j] = ... sum_g a[x,j,g] * b[j,g].
+    The last axis of a and b and the j axis of out must be contiguous.
+    cuTENSOR runs this pattern (j in both inputs and the output) far below the
+    memory bandwidth; here a thread block reduces each row j.
+    '''
+    assert a.dtype == b.dtype == np.float64
+    b_2d = b.ndim == 2
+    if b_2d:
+        b = b[None]
+    na, n, ng = a.shape
+    nb = b.shape[0]
+    assert b.shape[1:] == (n, ng) and a.strides[2] == b.strides[2] == 8
+    assert na * nb <= 256  # one thread of the block writes each output
+    if out is None:
+        out = cupy.empty((na, n) if b_2d else (na, nb, n))
+        beta = 0.
+    if b_2d:
+        assert out.shape == (na, n) and out.strides[1] == 8
+        so_x, so_y = out.strides[0] // 8, 0
+    else:
+        assert out.shape == (na, nb, n) and out.strides[2] == 8
+        so_x, so_y = out.strides[0] // 8, out.strides[1] // 8
+    fn_name = f'ddot_rows_{na}x{nb}'
+    if fn_name not in _kernel_registery:
+        kernel_code = f'''
+extern "C" __global__
+void {fn_name}(double *out, const double *a, const double *b, int n, int ng,
+        long long sa_x, long long sa_j, long long sb_y, long long sb_j,
+        long long so_x, long long so_y, double beta)
+{{
+    int j = blockIdx.x;
+    const double *aj = a + j * sa_j;
+    const double *bj = b + j * sb_j;
+    double s[{na*nb}];
+#pragma unroll
+    for (int k = 0; k < {na*nb}; ++k) s[k] = 0.;
+    for (int g = threadIdx.x; g < ng; g += blockDim.x) {{
+        double av[{na}], bv[{nb}];
+#pragma unroll
+        for (int x = 0; x < {na}; ++x) av[x] = aj[x*sa_x+g];
+#pragma unroll
+        for (int y = 0; y < {nb}; ++y) bv[y] = bj[y*sb_y+g];
+#pragma unroll
+        for (int x = 0; x < {na}; ++x)
+#pragma unroll
+        for (int y = 0; y < {nb}; ++y) s[x*{nb}+y] += av[x] * bv[y];
+    }}
+    // blockDim.x = 256: reduce each warp, then the 8 warps
+    __shared__ double red[{na*nb}][8];
+    int lane = threadIdx.x % 32;
+    int warp = threadIdx.x / 32;
+#pragma unroll
+    for (int k = 0; k < {na*nb}; ++k) {{
+        double v = s[k];
+        for (int offset = 16; offset > 0; offset >>= 1) {{
+            v += __shfl_down_sync(0xffffffff, v, offset);
+        }}
+        if (lane == 0) red[k][warp] = v;
+    }}
+    __syncthreads();
+    if (threadIdx.x < {na*nb}) {{
+        double v = 0.;
+        for (int w = 0; w < 8; ++w) v += red[threadIdx.x][w];
+        int x = threadIdx.x / {nb};
+        int y = threadIdx.x % {nb};
+        double *o = out + x * so_x + y * so_y + j;
+        if (beta == 0.) {{
+            *o = v;
+        }} else {{
+            *o = beta * *o + v;
+        }}
+    }}
+}}
+'''
+        _kernel_registery[fn_name] = cupy.RawKernel(kernel_code, fn_name)
+    kernel = _kernel_registery[fn_name]
+    if n > 0:
+        kernel((n,), (256,), (out, a, b, np.int32(n), np.int32(ng),
+                              np.int64(a.strides[0]//8), np.int64(a.strides[1]//8),
+                              np.int64(b.strides[0]//8), np.int64(b.strides[1]//8),
+                              np.int64(so_x), np.int64(so_y), np.float64(beta)))
+    return out
+
 def sandwich_dot(a, c, out=None):
     '''Performs c.T.dot(a).dot(c)'''
     a = cupy.asarray(a)
