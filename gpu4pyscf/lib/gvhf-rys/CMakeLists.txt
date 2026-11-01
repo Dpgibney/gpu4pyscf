@@ -5,7 +5,7 @@ add_library(gvhf_rys SHARED
   nr_sr_estimator.c nr_sr_estimator.cu
   rys_contract_j.cu cart2xyz.c #unrolled_rys_j.cu
   rys_constant.cu
-  rys_contract_k.cu unrolled_rys_k.cu
+  rys_contract_k.cu unrolled_rys_k.cu generated_rys_k.cu
   rys_contract_jk.cu unrolled_rys_jk.cu
   rys_contract_jk_ip1.cu unrolled_rys_jk_ip1.cu unrolled_ejk_ip1.cu
   rys_contract_jk_ip2.cu unrolled_ejk_ip2_type12.cu unrolled_ejk_ip2_type3.cu

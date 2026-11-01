@@ -599,6 +599,10 @@ void threads_scheme_for_k(int *scheme, BoundsInfo &bounds,
     scheme[3] = reserved_shm_size;
 }
 
+extern int rys_k_generated(RysIntEnvVars *envs, JKMatrix *kmat, BoundsInfo *bounds,
+                           float *q_cond_ij, float *q_cond_kl, float dm_penalty,
+                           float *s_cond_ij, float *s_cond_kl, float *diffuse_exps,
+                           uint32_t *pool, int *head, int workers);
 extern int rys_k_unrolled(RysIntEnvVars *envs, JKMatrix *kmat, BoundsInfo *bounds,
                           float *q_cond_ij, float *q_cond_kl, float dm_penalty,
                           float *s_cond_ij, float *s_cond_kl, float *diffuse_exps,
@@ -659,7 +663,9 @@ int RYS_build_k(double *vk, double *dm, int n_dm, int nao,
     cudaMemset(head, 0, sizeof(int)*3);
 
     if (!rys_k_unrolled(envs, &kmat, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
-                        s_cond_ij, s_cond_kl, diffuse_exps, pool, head, workers)) {
+                        s_cond_ij, s_cond_kl, diffuse_exps, pool, head, workers) &&
+        !rys_k_generated(envs, &kmat, &bounds, q_cond_ij, q_cond_kl, dm_penalty,
+                         s_cond_ij, s_cond_kl, diffuse_exps, pool, head, workers)) {
         GXYZOffset gxyz_offset[256*3];
         RYS_make_gxyz_offset(gxyz_offset, bounds);
         int gout_pattern = (((li == 0) << 3) |
