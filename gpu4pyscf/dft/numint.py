@@ -195,6 +195,7 @@ def _eval_rho2(ao, cpos, xctype, with_lapl=False, buf=None, rho=None):
         nvar = 2
 
     nmo = cpos.shape[1]
+    buf_in = buf
     buf = ndarray((nvar,nmo,ngrids), dtype=cpos.dtype, buffer=buf)
     if rho is None:
         if xctype == 'LDA' or xctype == 'HF':
@@ -208,26 +209,61 @@ def _eval_rho2(ao, cpos, xctype, with_lapl=False, buf=None, rho=None):
         c0 = cupy.dot(cpos.T, ao, out=buf[0])
         _contract_rho(c0, c0, rho=rho)
     elif xctype in ('GGA', 'NLC'):
-        c0 = cupy.dot(cpos.T, ao[0], out=buf[0])
-        _contract_rho(c0, c0, rho=rho[0])
-        for i in range(1, 4):
-            c1 = cupy.dot(cpos.T, ao[i], out=buf[1])
-            _contract_rho(c0, c1, rho=rho[i])
-        rho[1:] *= 2
+        if ao.flags.c_contiguous:
+            nao = ao.shape[1]
+            dm_ao = None
+            if buf_in is not None and buf_in.nbytes >= (nmo + nao) * ngrids * 8:
+                # dm ao[0] after c0 in the caller's buffer
+                dm_ao = cupy.ndarray((nao, ngrids), memptr=buf_in.data + nmo * ngrids * 8)
+            _eval_rho2_gga(ao, cpos, rho, buf[0], dm_ao)
+        else:
+            c0 = cupy.dot(cpos.T, ao[0], out=buf[0])
+            _contract_rho(c0, c0, rho=rho[0])
+            for i in range(1, 4):
+                c1 = cupy.dot(cpos.T, ao[i], out=buf[1])
+                _contract_rho(c0, c1, rho=rho[i])
+            rho[1:] *= 2
     else: # meta-GGA
         assert not with_lapl
-        tau_idx = 4
-        c0 = cupy.dot(cpos.T, ao[0], out=buf[0])
-        _contract_rho(c0, c0, rho=rho[0])
-        rho[tau_idx] = 0
-        for i in range(1, 4):
-            c1 = cupy.dot(cpos.T, ao[i], out=buf[1])
-            rho[i] = _contract_rho(c0, c1)
-            rho[tau_idx] += _contract_rho(c1, c1)
-
-        rho[1:4] *= 2
-        rho[tau_idx] *= .5
+        _eval_rho2_mgga(ao, cpos, rho, buf[0], buf[1:])
     return rho
+
+def _eval_rho2_gga(ao, cpos, rho, c0, dm_ao=None):
+    '''GGA density on a grid block from cpos = C sqrt(occ). rho[0] comes from
+    c0 = cpos^T ao[0], and nabla rho = 2 sum_i nabla ao_i (cpos c0)_i: one GEMM in
+    place of the three cpos^T nabla ao. c0 and dm_ao receive the products
+    cpos^T ao[0] and cpos c0 (= dm ao[0]); ao must be C-contiguous.
+    '''
+    nao, ngrids = ao.shape[1:]
+    if dm_ao is None:
+        dm_ao = cupy.empty((nao, ngrids))
+    if cpos.shape[1] == 0:
+        rho[:4] = 0
+        dm_ao[:] = 0
+        return dm_ao
+    cupy.dot(cpos.T, ao[0], out=c0)
+    _contract_rho(c0, c0, rho=rho[0])
+    cupy.dot(cpos, c0, out=dm_ao)
+    rho4 = _contract_rho4(dm_ao, ao[:4])
+    cupy.multiply(rho4[1:], 2, out=rho[1:4])
+    return dm_ao
+
+def _eval_rho2_mgga(ao, cpos, rho, c0, c1):
+    '''Meta-GGA density on a grid block from cpos = C sqrt(occ). c0 and c1 receive
+    cpos^T ao[0] and cpos^T ao[1:4]; c1 holds either all three or one at a time.
+    '''
+    tau_idx = 4
+    cupy.dot(cpos.T, ao[0], out=c0)
+    _contract_rho(c0, c0, rho=rho[0])
+    rho[tau_idx] = 0
+    for i in range(1, 4):
+        ci = c1[(i-1) % len(c1)]
+        cupy.dot(cpos.T, ao[i], out=ci)
+        rho[i] = _contract_rho(c0, ci)
+        rho[tau_idx] += _contract_rho(ci, ci)
+
+    rho[1:4] *= 2
+    rho[tau_idx] *= .5
 
 def eval_rho2(mol, ao, mo_coeff, mo_occ, non0tab=None, xctype='LDA',
               with_lapl=False, verbose=None, buf=None, out=None):
@@ -468,7 +504,8 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
             mo_coeff *= mo_occ[mo_occ>0]**.5
             nocc = mo_coeff.shape[1]
             mo_buf = cupy.empty(nao*nocc)
-            buf = cupy.empty(MIN_BLK_SIZE * max(2*nocc, nao))
+            # GGA: C^T ao and dm ao (_eval_rho2_gga)
+            buf = cupy.empty(MIN_BLK_SIZE * max(2*nocc, nao + nocc))
 
         p0 = p1 = 0
         for ao_mask, idx, weight, _ in ni.block_loop(
@@ -881,7 +918,8 @@ def _nr_uks_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
             nocc_alpha = mo_coeff_alpha.shape[1]
             nocc_beta = mo_coeff_beta.shape[1]
             mo_buf = cupy.empty(nao*max(nocc_alpha, nocc_beta))
-            buf= cupy.empty(MIN_BLK_SIZE * max(2*nocc_alpha, 2*nocc_beta, nao))
+            # GGA: C^T ao and dm ao (_eval_rho2_gga)
+            buf= cupy.empty(MIN_BLK_SIZE * max(2*nocc_alpha, 2*nocc_beta, nao + max(nocc_alpha, nocc_beta)))
 
         p0 = p1 = 0
         for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv,
@@ -2308,6 +2346,26 @@ def _contract_rho(bra, ket, rho=None):
             raise RuntimeError('CUDA Error')
     else:
         contract('ig,ig->g', bra, ket, out=rho)
+    return rho
+
+def _contract_rho4(bra, ket, rho=None):
+    ''' ig,nig->ng for the first four components of ket
+    '''
+    nao, ngrids = bra.shape
+    assert ket.shape == (4, nao, ngrids)
+    assert bra.flags.c_contiguous and ket.flags.c_contiguous
+    rho = ndarray((4, ngrids), buffer=rho)
+    if ngrids == 0:
+        return rho
+    stream = cupy.cuda.get_current_stream()
+    err = libgdft.GDFTcontract_rho4(
+        ctypes.cast(stream.ptr, ctypes.c_void_p),
+        ctypes.cast(rho.data.ptr, ctypes.c_void_p),
+        ctypes.cast(bra.data.ptr, ctypes.c_void_p),
+        ctypes.cast(ket.data.ptr, ctypes.c_void_p),
+        ctypes.c_int(ngrids), ctypes.c_int(nao), ctypes.c_int(1))
+    if err != 0:
+        raise RuntimeError('CUDA Error')
     return rho
 
 def _contract_rho1(bra, ket, rho=None):
