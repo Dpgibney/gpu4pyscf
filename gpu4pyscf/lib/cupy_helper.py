@@ -1292,6 +1292,63 @@ void {fn_name}(double *out, const double *a, const double *b, int n, int ng,
                               np.int64(so_x), np.int64(so_y), np.float64(beta)))
     return out
 
+_gemm_algo_of_device = {}
+
+def _gemm_abt_algo():
+    '''cuBLAS GEMM algorithm for dot_abt on the current device'''
+    dev = cupy.cuda.Device()
+    algo = _gemm_algo_of_device.get(dev.id)
+    if algo is None:
+        # On compute capability 7.5 the default heuristic pads these GEMMs into 128x64 tiles;
+        # CUBLAS_GEMM_ALGO1 is 1.15-1.9x faster there for n = 40-800, k = 4096 and loses at most
+        # 5 us below that. Newer devices ignore the algorithm numbers, so they keep the default.
+        algo = 1 if dev.compute_capability == '75' else -1
+        _gemm_algo_of_device[dev.id] = algo
+    return algo
+
+def dot_abt(a, b, out=None, beta=0.):
+    '''out = a.dot(b.T) + beta*out for row-major a (m, k) and b (n, k): the XC code's
+    per-block products of AO-sized arrays over the grid points (k), through
+    cublasGemmEx with the algorithm of _gemm_abt_algo.
+    '''
+    assert a.dtype == b.dtype == np.float64 and a.ndim == b.ndim == 2
+    m, k = a.shape
+    n = b.shape[0]
+    assert b.shape[1] == k
+    if out is None:
+        out = cupy.empty((m, n))
+        beta = 0.
+    assert out.shape == (m, n)
+    if (m == 0 or n == 0 or k == 0 or not (a.flags.c_contiguous and b.flags.c_contiguous
+                                            and out.flags.c_contiguous)):
+        if beta == 0.:
+            out[:] = a.dot(b.T)
+        else:
+            out *= beta
+            out += a.dot(b.T)
+        return out
+    from cupy_backends.cuda.libs import cublas
+    handle = cupy.cuda.device.get_cublas_handle()
+    cublas.setStream(handle, cupy.cuda.get_current_stream().ptr)
+    cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
+    alpha = np.ones(1)
+    beta = np.full(1, beta)
+    # column-major out^T (n, m) = b^T(cm)^T a^T(cm), both stored with leading dimension k
+    gemm_args = (handle, cublas.CUBLAS_OP_T, cublas.CUBLAS_OP_N, n, m, k,
+                 alpha.ctypes.data, b.data.ptr, 1, k, a.data.ptr, 1, k,  # 1: CUDA_R_64F
+                 beta.ctypes.data, out.data.ptr, 1, n, 70)  # 70: CUBLAS_COMPUTE_64F
+    algo = _gemm_abt_algo()
+    if algo != -1:
+        try:
+            cublas.gemmEx(*gemm_args, algo)
+            return out
+        except cublas.CUBLASError:
+            # CUBLAS_STATUS_NOT_SUPPORTED for some shapes and alignments (e.g. an odd k):
+            # nothing was computed, so the default heuristic runs instead
+            pass
+    cublas.gemmEx(*gemm_args, -1)
+    return out
+
 def sandwich_dot(a, c, out=None):
     '''Performs c.T.dot(a).dot(c)'''
     a = cupy.asarray(a)
