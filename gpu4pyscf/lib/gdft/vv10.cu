@@ -708,7 +708,142 @@ static void vv10_hess_eval_D_B_in_double_grid_response_offdiagonal_kernel(double
     D_B[B_atom * 9 * ngrids + 8 * ngrids + i] = -(2 * 1.5) * D_B_i[8];
 }
 
+// part 28: T_j = sum over i on other atoms of K_ij (r_i - r_j), each unordered pair once (zeroed before)
+__global__
+static void vv10_grad_grid_response_T_kernel(double* __restrict__ T, const double* __restrict__ grid_coord,
+                                             const double* __restrict__ rho_weight, const double* __restrict__ omega,
+                                             const double* __restrict__ kappa, const int* __restrict__ atom,
+                                             const int ngrids, const int jtiles)
+{
+    const int ntiles = (ngrids + VV10_TILE - 1) / VV10_TILE;
+    const int I = blockIdx.x;
+    const int J0 = I + blockIdx.y * jtiles;
+    if (J0 >= ntiles) {
+        return;
+    }
+    const int J1 = min(J0 + jtiles, ntiles);
+    const int t = threadIdx.x;
+    const int lane = t % 32;
+    const int warp = t / 32;
+    const int i = I * VV10_TILE + t;
+    double omega_i = 1., kappa_i = 1., rho_weight_i = 0.;
+    double3 r_i = {0., 0., 0.};
+    int atom_i = -1;
+    if (i < ngrids) {
+        omega_i = omega[i];
+        kappa_i = kappa[i];
+        rho_weight_i = rho_weight[i];
+        r_i.x = grid_coord[i * 3 + 0];
+        r_i.y = grid_coord[i * 3 + 1];
+        r_i.z = grid_coord[i * 3 + 2];
+        atom_i = atom[i];
+    }
+    double Tix = 0, Tiy = 0, Tiz = 0;
+
+    __shared__ double s_x[VV10_TILE], s_y[VV10_TILE], s_z[VV10_TILE];
+    __shared__ double s_o[VV10_TILE], s_k[VV10_TILE], s_w[VV10_TILE];
+    __shared__ int s_a[VV10_TILE];
+    __shared__ double s_acc[VV10_WARPS][3][VV10_TILE];
+    const int next = (lane + 1) % 32;
+
+    for (int J = J0; J < J1; J++) {
+        const int jt = J * VV10_TILE + t;
+        if (jt < ngrids) {
+            s_x[t] = grid_coord[jt * 3 + 0];
+            s_y[t] = grid_coord[jt * 3 + 1];
+            s_z[t] = grid_coord[jt * 3 + 2];
+            s_o[t] = omega[jt];
+            s_k[t] = kappa[jt];
+            s_w[t] = rho_weight[jt];
+            s_a[t] = atom[jt];
+        } else {
+            s_x[t] = 0.; s_y[t] = 0.; s_z[t] = 0.;
+            s_o[t] = 1.; s_k[t] = 1.; s_w[t] = 0.;
+            s_a[t] = -2;
+        }
+        __syncthreads();
+        const bool diag = J == I;
+        for (int c = 0; c < VV10_WARPS; c++) {
+            double Tjx = 0, Tjy = 0, Tjz = 0;
+            if (!diag || c >= warp) {
+                for (int s = 0; s < 32; s++) {
+                    const int jj = c * 32 + (lane + s) % 32;
+                    const double dx = r_i.x - s_x[jj];
+                    const double dy = r_i.y - s_y[jj];
+                    const double dz = r_i.z - s_z[jj];
+                    const double omega_j = s_o[jj];
+                    const double kappa_j = s_k[jj];
+                    const double r_ij2 = dx * dx + dy * dy + dz * dz;
+                    const double g_ij = omega_i * r_ij2 + kappa_i;
+                    const double g_ji = omega_j * r_ij2 + kappa_j;
+                    const double g_sum = g_ij + g_ji;
+                    const double g_ij_ji_sum_1 = 1 / (g_ij * g_ji * g_sum);
+                    const double Phi_ij = -g_ij_ji_sum_1;
+                    const double dPhi_drj_over_Phi = (omega_i * g_ji * g_sum + omega_j * g_ij * g_sum + (omega_i + omega_j) * g_ij * g_ji) * g_ij_ji_sum_1;
+                    // pairs of points on different atoms; in a diagonal tile j > i (j == i is on one atom anyway)
+                    if (s_a[jj] != atom_i && (!diag || jj > t)) {
+                        const double K = rho_weight_i * s_w[jj] * Phi_ij * dPhi_drj_over_Phi;
+                        Tix -= K * dx;
+                        Tiy -= K * dy;
+                        Tiz -= K * dz;
+                        Tjx += K * dx;
+                        Tjy += K * dy;
+                        Tjz += K * dz;
+                    }
+                    Tjx = __shfl_sync(0xffffffff, Tjx, next);
+                    Tjy = __shfl_sync(0xffffffff, Tjy, next);
+                    Tjz = __shfl_sync(0xffffffff, Tjz, next);
+                }
+            }
+            s_acc[warp][0][c * 32 + lane] = Tjx;
+            s_acc[warp][1][c * 32 + lane] = Tjy;
+            s_acc[warp][2][c * 32 + lane] = Tjz;
+        }
+        __syncthreads();
+        if (jt < ngrids) {
+            double tx = 0, ty = 0, tz = 0;
+            for (int k = 0; k < VV10_WARPS; k++) {
+                tx += s_acc[k][0][t];
+                ty += s_acc[k][1][t];
+                tz += s_acc[k][2][t];
+            }
+            atomicAdd(T + 0 * ngrids + jt, tx);
+            atomicAdd(T + 1 * ngrids + jt, ty);
+            atomicAdd(T + 2 * ngrids + jt, tz);
+        }
+        __syncthreads();
+    }
+    if (i < ngrids) {
+        atomicAdd(T + 0 * ngrids + i, Tix);
+        atomicAdd(T + 1 * ngrids + i, Tiy);
+        atomicAdd(T + 2 * ngrids + i, Tiz);
+    }
+}
+
 extern "C" {
+// VV10 gradient, the grid response's pair term (part 28): T (3 x ngrids, zeroed here) with T_j = sum over the
+// points i on other atoms of K_ij (r_i - r_j); the term for atom B is 3 sum_{j on B} T_j
+__host__
+int VXC_vv10nlc_grad_grid_response_T(const cudaStream_t stream, double* T, const double* grid_coord,
+                                     const double* rho_weight, const double* omega, const double* kappa,
+                                     const int* atom, const int ngrids)
+{
+    if (ngrids <= 0) {
+        return 0;
+    }
+    cudaMemsetAsync(T, 0, 3 * ngrids * sizeof(double), stream);
+    const int ntiles = (ngrids + VV10_TILE - 1) / VV10_TILE;
+    const dim3 blocks(ntiles, (ntiles + VV10_JTILES - 1) / VV10_JTILES);
+    vv10_grad_grid_response_T_kernel<<<blocks, VV10_TILE, 0, stream>>>(T, grid_coord, rho_weight, omega, kappa,
+                                                                       atom, ngrids, VV10_JTILES);
+    const cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error of vv10 grad grid response T: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+    return 0;
+}
+
 __host__
 int VXC_vv10nlc_fock_eval_UWE(const cudaStream_t stream,
                               double* U, double* W, double* E,
