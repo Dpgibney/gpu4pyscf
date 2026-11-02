@@ -59,12 +59,12 @@ void md_j_0_0(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 480;
-    double *Rp_cache = Rq_cache + 1920;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 80 + sq_id;
+    double *Rp_cache = Rq_cache + 2400;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 96 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 2464; n += 256) {
+    for (int n = thread_id; n < 2960; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -87,11 +87,13 @@ void md_j_0_0(KERNEL_ARGS)
             Rq_cache[n+480] = ykl;
             Rq_cache[n+960] = zkl;
             Rq_cache[n+1440] = akl;
+            Rq_cache[n+1920] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+480] = 2e5;
             Rq_cache[n+960] = 2e5;
             Rq_cache[n+1440] = 1.;
+            Rq_cache[n+1920] = 1.;
         }
     }
 
@@ -119,11 +121,13 @@ void md_j_0_0(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -168,16 +172,19 @@ void md_j_0_0(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+480];
             double zkl = Rq_cache[sq_kl+960];
             double akl = Rq_cache[sq_kl+1440];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+1920];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 0, 0, 256);
             vj_kl0 = 0.;
@@ -259,12 +266,12 @@ void md_j_1_0(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 368;
-    double *Rp_cache = Rq_cache + 1472;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 128 + sq_id;
+    double *Rp_cache = Rq_cache + 1840;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 144 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 1904; n += 256) {
+    for (int n = thread_id; n < 2288; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -287,11 +294,13 @@ void md_j_1_0(KERNEL_ARGS)
             Rq_cache[n+368] = ykl;
             Rq_cache[n+736] = zkl;
             Rq_cache[n+1104] = akl;
+            Rq_cache[n+1472] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+368] = 2e5;
             Rq_cache[n+736] = 2e5;
             Rq_cache[n+1104] = 1.;
+            Rq_cache[n+1472] = 1.;
         }
     }
 
@@ -319,11 +328,13 @@ void md_j_1_0(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -361,16 +372,19 @@ void md_j_1_0(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+368];
             double zkl = Rq_cache[sq_kl+736];
             double akl = Rq_cache[sq_kl+1104];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+1472];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 1, 0, 256);
             vj_kl0 = 0.;
@@ -464,12 +478,12 @@ void md_j_1_1(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 640;
-    double *Rp_cache = Rq_cache + 640;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 128 + sq_id;
+    double *Rp_cache = Rq_cache + 800;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 144 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 1344; n += 256) {
+    for (int n = thread_id; n < 1520; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -492,11 +506,13 @@ void md_j_1_1(KERNEL_ARGS)
             Rq_cache[n+160] = ykl;
             Rq_cache[n+320] = zkl;
             Rq_cache[n+480] = akl;
+            Rq_cache[n+640] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+160] = 2e5;
             Rq_cache[n+320] = 2e5;
             Rq_cache[n+480] = 1.;
+            Rq_cache[n+640] = 1.;
         }
     }
 
@@ -524,11 +540,13 @@ void md_j_1_1(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -573,16 +591,19 @@ void md_j_1_1(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+160];
             double zkl = Rq_cache[sq_kl+320];
             double akl = Rq_cache[sq_kl+480];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+640];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 2, 0, 256);
             vj_kl0 = 0.;
@@ -724,12 +745,12 @@ void md_j_2_0(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 256;
-    double *Rp_cache = Rq_cache + 1024;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 224 + sq_id;
+    double *Rp_cache = Rq_cache + 1280;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 240 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 1344; n += 256) {
+    for (int n = thread_id; n < 1616; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -752,11 +773,13 @@ void md_j_2_0(KERNEL_ARGS)
             Rq_cache[n+256] = ykl;
             Rq_cache[n+512] = zkl;
             Rq_cache[n+768] = akl;
+            Rq_cache[n+1024] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+256] = 2e5;
             Rq_cache[n+512] = 2e5;
             Rq_cache[n+768] = 1.;
+            Rq_cache[n+1024] = 1.;
         }
     }
 
@@ -784,11 +807,13 @@ void md_j_2_0(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -826,16 +851,19 @@ void md_j_2_0(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+256];
             double zkl = Rq_cache[sq_kl+512];
             double akl = Rq_cache[sq_kl+768];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+1024];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 2, 0, 256);
             vj_kl0 = 0.;
@@ -947,12 +975,12 @@ void md_j_2_1(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 1920;
-    double *Rp_cache = Rq_cache + 1920;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 224 + sq_id;
+    double *Rp_cache = Rq_cache + 2400;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 240 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 3904; n += 256) {
+    for (int n = thread_id; n < 4400; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -975,11 +1003,13 @@ void md_j_2_1(KERNEL_ARGS)
             Rq_cache[n+480] = ykl;
             Rq_cache[n+960] = zkl;
             Rq_cache[n+1440] = akl;
+            Rq_cache[n+1920] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+480] = 2e5;
             Rq_cache[n+960] = 2e5;
             Rq_cache[n+1440] = 1.;
+            Rq_cache[n+1920] = 1.;
         }
     }
 
@@ -1007,11 +1037,13 @@ void md_j_2_1(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -1049,16 +1081,19 @@ void md_j_2_1(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+480];
             double zkl = Rq_cache[sq_kl+960];
             double akl = Rq_cache[sq_kl+1440];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+1920];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 3, 0, 256);
             vj_kl0 = 0.;
@@ -1270,12 +1305,12 @@ void md_j_2_2(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 2240;
-    double *Rp_cache = Rq_cache + 896;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 224 + sq_id;
+    double *Rp_cache = Rq_cache + 1120;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 240 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 3200; n += 256) {
+    for (int n = thread_id; n < 3440; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -1298,11 +1333,13 @@ void md_j_2_2(KERNEL_ARGS)
             Rq_cache[n+224] = ykl;
             Rq_cache[n+448] = zkl;
             Rq_cache[n+672] = akl;
+            Rq_cache[n+896] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+224] = 2e5;
             Rq_cache[n+448] = 2e5;
             Rq_cache[n+672] = 1.;
+            Rq_cache[n+896] = 1.;
         }
     }
 
@@ -1330,11 +1367,13 @@ void md_j_2_2(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -1379,16 +1418,19 @@ void md_j_2_2(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+224];
             double zkl = Rq_cache[sq_kl+448];
             double akl = Rq_cache[sq_kl+672];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+896];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 4, 0, 256);
             vj_kl0 = 0.;
@@ -1787,12 +1829,12 @@ void md_j_3_0(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 736;
-    double *Rp_cache = Rq_cache + 2944;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 384 + sq_id;
+    double *Rp_cache = Rq_cache + 3680;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 400 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 3744; n += 256) {
+    for (int n = thread_id; n < 4496; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -1815,11 +1857,13 @@ void md_j_3_0(KERNEL_ARGS)
             Rq_cache[n+736] = ykl;
             Rq_cache[n+1472] = zkl;
             Rq_cache[n+2208] = akl;
+            Rq_cache[n+2944] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+736] = 2e5;
             Rq_cache[n+1472] = 2e5;
             Rq_cache[n+2208] = 1.;
+            Rq_cache[n+2944] = 1.;
         }
     }
 
@@ -1847,11 +1891,13 @@ void md_j_3_0(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -1889,16 +1935,19 @@ void md_j_3_0(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+736];
             double zkl = Rq_cache[sq_kl+1472];
             double akl = Rq_cache[sq_kl+2208];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+2944];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 3, 0, 256);
             vj_kl0 = 0.;
@@ -2045,12 +2094,12 @@ void md_j_3_1(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 1536;
-    double *Rp_cache = Rq_cache + 1536;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 384 + sq_id;
+    double *Rp_cache = Rq_cache + 1920;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 400 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 3136; n += 256) {
+    for (int n = thread_id; n < 3536; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -2073,11 +2122,13 @@ void md_j_3_1(KERNEL_ARGS)
             Rq_cache[n+384] = ykl;
             Rq_cache[n+768] = zkl;
             Rq_cache[n+1152] = akl;
+            Rq_cache[n+1536] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+384] = 2e5;
             Rq_cache[n+768] = 2e5;
             Rq_cache[n+1152] = 1.;
+            Rq_cache[n+1536] = 1.;
         }
     }
 
@@ -2105,11 +2156,13 @@ void md_j_3_1(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -2147,16 +2200,19 @@ void md_j_3_1(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+384];
             double zkl = Rq_cache[sq_kl+768];
             double akl = Rq_cache[sq_kl+1152];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+1536];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 4, 0, 256);
             vj_kl0 = 0.;
@@ -2475,12 +2531,12 @@ void md_j_3_2(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 1760;
-    double *Rp_cache = Rq_cache + 704;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 384 + sq_id;
+    double *Rp_cache = Rq_cache + 880;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 400 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 2528; n += 256) {
+    for (int n = thread_id; n < 2720; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -2503,11 +2559,13 @@ void md_j_3_2(KERNEL_ARGS)
             Rq_cache[n+176] = ykl;
             Rq_cache[n+352] = zkl;
             Rq_cache[n+528] = akl;
+            Rq_cache[n+704] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+176] = 2e5;
             Rq_cache[n+352] = 2e5;
             Rq_cache[n+528] = 1.;
+            Rq_cache[n+704] = 1.;
         }
     }
 
@@ -2535,11 +2593,13 @@ void md_j_3_2(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -2577,16 +2637,19 @@ void md_j_3_2(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+176];
             double zkl = Rq_cache[sq_kl+352];
             double akl = Rq_cache[sq_kl+528];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+704];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 5, 0, 256);
             vj_kl0 = 0.;
@@ -3236,12 +3299,12 @@ void md_j_4_0(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 576;
-    double *Rp_cache = Rq_cache + 2304;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 624 + sq_id;
+    double *Rp_cache = Rq_cache + 2880;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 640 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 2944; n += 256) {
+    for (int n = thread_id; n < 3536; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -3264,11 +3327,13 @@ void md_j_4_0(KERNEL_ARGS)
             Rq_cache[n+576] = ykl;
             Rq_cache[n+1152] = zkl;
             Rq_cache[n+1728] = akl;
+            Rq_cache[n+2304] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+576] = 2e5;
             Rq_cache[n+1152] = 2e5;
             Rq_cache[n+1728] = 1.;
+            Rq_cache[n+2304] = 1.;
         }
     }
 
@@ -3296,11 +3361,13 @@ void md_j_4_0(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -3338,16 +3405,19 @@ void md_j_4_0(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+576];
             double zkl = Rq_cache[sq_kl+1152];
             double akl = Rq_cache[sq_kl+1728];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+2304];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 4, 0, 256);
             vj_kl0 = 0.;
@@ -3558,12 +3628,12 @@ void md_j_4_1(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 1152;
-    double *Rp_cache = Rq_cache + 1152;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 624 + sq_id;
+    double *Rp_cache = Rq_cache + 1440;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 640 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 2368; n += 256) {
+    for (int n = thread_id; n < 2672; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -3586,11 +3656,13 @@ void md_j_4_1(KERNEL_ARGS)
             Rq_cache[n+288] = ykl;
             Rq_cache[n+576] = zkl;
             Rq_cache[n+864] = akl;
+            Rq_cache[n+1152] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+288] = 2e5;
             Rq_cache[n+576] = 2e5;
             Rq_cache[n+864] = 1.;
+            Rq_cache[n+1152] = 1.;
         }
     }
 
@@ -3618,11 +3690,13 @@ void md_j_4_1(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -3660,16 +3734,19 @@ void md_j_4_1(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+288];
             double zkl = Rq_cache[sq_kl+576];
             double akl = Rq_cache[sq_kl+864];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+1152];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 5, 0, 256);
             vj_kl0 = 0.;
@@ -4163,12 +4240,12 @@ void md_j_5_0(KERNEL_ARGS)
     int npairs_ij = bounds.npairs_ij;
     int npairs_kl = bounds.npairs_kl;
     double *Rq_cache = vj_kl_cache + 416;
-    double *Rp_cache = Rq_cache + 1664;
-    double *dm_ij_cache = Rp_cache + 64 + tx;
-    double *gamma_inc = Rp_cache + 960 + sq_id;
+    double *Rp_cache = Rq_cache + 2080;
+    double *dm_ij_cache = Rp_cache + 80 + tx;
+    double *gamma_inc = Rp_cache + 976 + sq_id;
     float *qd_ij_max = bounds.qd_ij_max;
     float *qd_kl_max = bounds.qd_kl_max;
-    for (int n = thread_id; n < 2144; n += 256) {
+    for (int n = thread_id; n < 2576; n += 256) {
         vj_kl_cache[n] = 0.;
     }
     __syncthreads();
@@ -4191,11 +4268,13 @@ void md_j_5_0(KERNEL_ARGS)
             Rq_cache[n+416] = ykl;
             Rq_cache[n+832] = zkl;
             Rq_cache[n+1248] = akl;
+            Rq_cache[n+1664] = 1. / akl;
         } else {
             Rq_cache[n+0] = 2e5;
             Rq_cache[n+416] = 2e5;
             Rq_cache[n+832] = 2e5;
             Rq_cache[n+1248] = 1.;
+            Rq_cache[n+1664] = 1.;
         }
     }
 
@@ -4223,11 +4302,13 @@ void md_j_5_0(KERNEL_ARGS)
                 Rp_cache[thread_id+16] = yij;
                 Rp_cache[thread_id+32] = zij;
                 Rp_cache[thread_id+48] = aij;
+                Rp_cache[thread_id+64] = 1. / aij;
             } else {
                 Rp_cache[thread_id+0] = 2e5;
                 Rp_cache[thread_id+16] = 2e5;
                 Rp_cache[thread_id+32] = 2e5;
                 Rp_cache[thread_id+48] = 1.; // aij
+                Rp_cache[thread_id+64] = 1.;
             }
         }
         int task_ij = task_ij0 + tx;
@@ -4265,16 +4346,19 @@ void md_j_5_0(KERNEL_ARGS)
             double yij = Rp_cache[tx+16];
             double zij = Rp_cache[tx+32];
             double aij = Rp_cache[tx+48];
+            double inv_aij = Rp_cache[tx+64];
             double xkl = Rq_cache[sq_kl+0];
             double ykl = Rq_cache[sq_kl+416];
             double zkl = Rq_cache[sq_kl+832];
             double akl = Rq_cache[sq_kl+1248];
-            fac = fac / (aij*akl*sqrt(aij+akl));
+            double inv_akl = Rq_cache[sq_kl+1664];
+            double rs = rsqrt(aij+akl);
+            fac = fac * (inv_aij * inv_akl * rs);
             double xpq = xij - xkl;
             double ypq = yij - ykl;
             double zpq = zij - zkl;
             double rr = xpq*xpq + ypq*ypq + zpq*zpq;
-            double theta = aij * akl / (aij + akl);
+            double theta = aij * akl * (rs * rs);
             double omega = jk.omega;
             boys_fn(gamma_inc, theta, rr, omega, fac, 5, 0, 256);
             {
@@ -4718,81 +4802,85 @@ int md_j_unrolled(RysIntEnvVars *envs, JKMatrix *jk, MDBoundsInfo *bounds,
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 30, (npairs_kl + 479) / 480, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 479) / 480, 1);
-        LAUNCH_KERNEL(md_j_0_0, (2992+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_0_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (3488+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_0_0, (3488+addition_buf)*sizeof(double)); break;
     } break;
     case 11: { // lij=1, lkl=0, tilex=48, tiley=23
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 367) / 368, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 367) / 368, 1);
-        LAUNCH_KERNEL(md_j_1_0, (2992+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_1_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (3376+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_1_0, (3376+addition_buf)*sizeof(double)); break;
     } break;
     case 12: { // lij=1, lkl=1, tilex=10, tiley=10
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 10, (npairs_kl + 159) / 160, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 159) / 160, 1);
-        LAUNCH_KERNEL(md_j_1_1, (2944+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_1_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (3120+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_1_1, (3120+addition_buf)*sizeof(double)); break;
     } break;
     case 22: { // lij=2, lkl=0, tilex=48, tiley=16
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 255) / 256, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 255) / 256, 1);
-        LAUNCH_KERNEL(md_j_2_0, (3040+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_2_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (3312+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_2_0, (3312+addition_buf)*sizeof(double)); break;
     } break;
     case 23: { // lij=2, lkl=1, tilex=48, tiley=30
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 479) / 480, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 479) / 480, 1);
-        cudaFuncSetAttribute(md_j_2_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (6112+addition_buf)*sizeof(double));
-        LAUNCH_KERNEL(md_j_2_1, (6112+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_2_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (6608+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_2_1, (6608+addition_buf)*sizeof(double)); break;
     } break;
     case 24: { // lij=2, lkl=2, tilex=14, tiley=14
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 14, (npairs_kl + 223) / 224, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 223) / 224, 1);
-        cudaFuncSetAttribute(md_j_2_2, cudaFuncAttributeMaxDynamicSharedMemorySize, (5920+addition_buf)*sizeof(double));
-        LAUNCH_KERNEL(md_j_2_2, (5920+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_2_2, cudaFuncAttributeMaxDynamicSharedMemorySize, (6160+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_2_2, (6160+addition_buf)*sizeof(double)); break;
     } break;
     case 33: { // lij=3, lkl=0, tilex=48, tiley=46
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 735) / 736, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 735) / 736, 1);
-        cudaFuncSetAttribute(md_j_3_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6112+addition_buf)*sizeof(double));
-        LAUNCH_KERNEL(md_j_3_0, (6112+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_3_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6864+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_3_0, (6864+addition_buf)*sizeof(double)); break;
     } break;
     case 34: { // lij=3, lkl=1, tilex=48, tiley=24
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 383) / 384, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 383) / 384, 1);
-        cudaFuncSetAttribute(md_j_3_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (6016+addition_buf)*sizeof(double));
-        LAUNCH_KERNEL(md_j_3_1, (6016+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_3_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (6416+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_3_1, (6416+addition_buf)*sizeof(double)); break;
     } break;
     case 35: { // lij=3, lkl=2, tilex=48, tiley=11
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 175) / 176, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 175) / 176, 1);
-        cudaFuncSetAttribute(md_j_3_2, cudaFuncAttributeMaxDynamicSharedMemorySize, (5920+addition_buf)*sizeof(double));
-        LAUNCH_KERNEL(md_j_3_2, (5920+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_3_2, cudaFuncAttributeMaxDynamicSharedMemorySize, (6112+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_3_2, (6112+addition_buf)*sizeof(double)); break;
     } break;
     case 44: { // lij=4, lkl=0, tilex=48, tiley=36
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 575) / 576, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 575) / 576, 1);
-        cudaFuncSetAttribute(md_j_4_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6064+addition_buf)*sizeof(double));
-        LAUNCH_KERNEL(md_j_4_0, (6064+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_4_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6656+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_4_0, (6656+addition_buf)*sizeof(double)); break;
     } break;
     case 45: { // lij=4, lkl=1, tilex=48, tiley=18
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 287) / 288, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 287) / 288, 1);
-        cudaFuncSetAttribute(md_j_4_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (6000+addition_buf)*sizeof(double));
-        LAUNCH_KERNEL(md_j_4_1, (6000+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_4_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (6304+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_4_1, (6304+addition_buf)*sizeof(double)); break;
     } break;
     case 55: { // lij=5, lkl=0, tilex=48, tiley=26
         dim3 threads(16, 16);
         dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 415) / 416, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
                     (npairs_kl + 415) / 416, 1);
-        cudaFuncSetAttribute(md_j_5_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6112+addition_buf)*sizeof(double));
-        LAUNCH_KERNEL(md_j_5_0, (6112+addition_buf)*sizeof(double)); break;
+        cudaFuncSetAttribute(md_j_5_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6544+addition_buf)*sizeof(double));
+        LAUNCH_KERNEL(md_j_5_0, (6544+addition_buf)*sizeof(double)); break;
     } break;
     default: return 0;
     }
