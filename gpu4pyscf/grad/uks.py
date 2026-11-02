@@ -222,12 +222,19 @@ def get_exc_full_response(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
     mol = None
     _sorted_mol = opt._sorted_mol
     nao = _sorted_mol.nao
+    # with the orbitals, dm[s] = cpos[s] cpos[s]^T enters through them (rks_grad._exc1_rho, _exc1_ao_dots)
+    cpos = None
+    if getattr(dms, 'mo_coeff', None) is not None and getattr(dms, 'mo_occ', None) is not None:
+        mo_occ = cupy.asarray(dms.mo_occ)
+        mo_coeff = cupy.asarray(dms.mo_coeff)
+        cpos = [opt.sort_orbitals(mo_coeff[s][:,mo_occ[s]>0] * mo_occ[s][mo_occ[s]>0]**.5, axis=[0])
+                for s in (0, 1)]
     dms = cupy.asarray(dms)
     assert dms.ndim == 3 and dms.shape[0] == 2
     dms = opt.sort_orbitals(dms.reshape(-1,nao,nao), axis=[1,2])
 
     de_grid_response_rho = cupy.zeros((natm, 3))
-    dvmat_orbital_response = cupy.zeros((2, 3, nao, nao))
+    exc1_ao = cupy.zeros((nao, 3))
     dm_mask_buf = cupy.empty(nao*nao)
 
     if xctype == 'LDA':
@@ -246,10 +253,14 @@ def get_exc_full_response(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
     g1 = 0
     for ao, idx, weight, _ in ni.block_loop(_sorted_mol, grids, deriv = ao_deriv):
         g0, g1 = g1, g1 + weight.size
-        dma_masked = take_last2d(dms[0], idx, out=dm_mask_buf)
-        rho[0, :, g0:g1] = numint.eval_rho(_sorted_mol, ao, dma_masked, xctype = xctype, hermi = 1)
-        dmb_masked = take_last2d(dms[1], idx, out=dm_mask_buf)
-        rho[1, :, g0:g1] = numint.eval_rho(_sorted_mol, ao, dmb_masked, xctype = xctype, hermi = 1)
+        if cpos is not None:
+            rho[0, :, g0:g1] = numint._eval_rho2(ao, cpos[0][idx], xctype)
+            rho[1, :, g0:g1] = numint._eval_rho2(ao, cpos[1][idx], xctype)
+        else:
+            dma_masked = take_last2d(dms[0], idx, out=dm_mask_buf)
+            rho[0, :, g0:g1] = numint.eval_rho(_sorted_mol, ao, dma_masked, xctype = xctype, hermi = 1)
+            dmb_masked = take_last2d(dms[1], idx, out=dm_mask_buf)
+            rho[1, :, g0:g1] = numint.eval_rho(_sorted_mol, ao, dmb_masked, xctype = xctype, hermi = 1)
     assert g1 == ngrids
 
     exc, vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=1)[:2]
@@ -281,6 +292,11 @@ def get_exc_full_response(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
     del dweightdA_right
     del exc
 
+    if cpos is not None:
+        nocc = max(c.shape[1] for c in cpos)
+        blksize = numint.MIN_BLK_SIZE
+        fac_buf = cupy.empty(rks_grad._exc1_rho_bufsize(xctype, nao, nocc) * blksize)
+        dot_buf = cupy.empty(rks_grad._exc1_ao_dots_bufsize(xctype, nao, nocc) * blksize)
     g0 = 0
     for ao, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv + 1):
         g1 = g0 + weight.shape[0]
@@ -294,57 +310,27 @@ def get_exc_full_response(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
         i_atom = int(grids.atm_idx[g0])
         assert cupy.max(cupy.abs(grids.atm_idx[g0:g1] - i_atom)) == 0 # Guaranteed by grids.build(sort_grids_of_each_atom = True)
 
+        split_wv = cupy.ascontiguousarray(wv[:, :, g0:g1][:, :, nonzero_weight_mask[g0:g1]])
         if xctype == 'LDA':
-            split_wv = cupy.ascontiguousarray(wv[:, :, g0:g1][:, :, nonzero_weight_mask[g0:g1]])
-
-            aow = numint._scale_ao(ao[0], split_wv[0, 0])
-            vtmp = rks_grad._d1_dot_(ao[1:4], aow.T)
-            dvmat_orbital_response[0][:, idx[:,None], idx] += vtmp
-            dma_masked = take_last2d(dms[0], idx, out=dm_mask_buf)
-            de_grid_response_rho[i_atom] += cupy.einsum('xij,ji->x', vtmp, dma_masked) * 2
-
-            aow = numint._scale_ao(ao[0], split_wv[1, 0])
-            vtmp = rks_grad._d1_dot_(ao[1:4], aow.T)
-            dvmat_orbital_response[1][:, idx[:,None], idx] += vtmp
-            dmb_masked = take_last2d(dms[1], idx, out=dm_mask_buf)
-            de_grid_response_rho[i_atom] += cupy.einsum('xij,ji->x', vtmp, dmb_masked) * 2
-
-        elif xctype == 'GGA':
-            split_wv = cupy.ascontiguousarray(wv[:, :, g0:g1][:, :, nonzero_weight_mask[g0:g1]])
+            split_wv = split_wv[:, 0]
+        else:
             split_wv[:, 0] *= .5
-
-            vtmp = rks_grad._gga_grad_sum_(ao, split_wv[0])
-            dvmat_orbital_response[0][:, idx[:,None], idx] += vtmp
-            dma_masked = take_last2d(dms[0], idx, out=dm_mask_buf)
-            de_grid_response_rho[i_atom] += cupy.einsum('xij,ji->x', vtmp, dma_masked) * 2
-
-            vtmp = rks_grad._gga_grad_sum_(ao, split_wv[1])
-            dvmat_orbital_response[1][:, idx[:,None], idx] += vtmp
-            dmb_masked = take_last2d(dms[1], idx, out=dm_mask_buf)
-            de_grid_response_rho[i_atom] += cupy.einsum('xij,ji->x', vtmp, dmb_masked) * 2
-
-        elif xctype == 'NLC':
-            raise ValueError("You see a bug, please report to the developer team.")
-
-        elif xctype == 'MGGA':
-            split_wv = cupy.ascontiguousarray(wv[:, :, g0:g1][:, :, nonzero_weight_mask[g0:g1]])
-            split_wv[:, 0] *= .5
+        if xctype == 'MGGA':
             split_wv[:, 4] *= .5 # for the factor 1/2 in tau
 
-            vtmp = rks_grad._gga_grad_sum_(ao, split_wv[0, :4])
-            rks_grad._tau_grad_dot_(ao, split_wv[0, 4], accumulate=True, out=vtmp)
-            dvmat_orbital_response[0][:, idx[:,None], idx] += vtmp
-            dma_masked = take_last2d(dms[0], idx, out=dm_mask_buf)
-            de_grid_response_rho[i_atom] += cupy.einsum('xij,ji->x', vtmp, dma_masked) * 2
-
-            vtmp = rks_grad._gga_grad_sum_(ao, split_wv[1, :4])
-            rks_grad._tau_grad_dot_(ao, split_wv[1, 4], accumulate=True, out=vtmp)
-            dvmat_orbital_response[1][:, idx[:,None], idx] += vtmp
-            dmb_masked = take_last2d(dms[1], idx, out=dm_mask_buf)
-            de_grid_response_rho[i_atom] += cupy.einsum('xij,ji->x', vtmp, dmb_masked) * 2
-
-        else:
-            raise NotImplementedError(f"Unrecognized xctype = {xctype}")
+        # sum_nu dm[s,mu,nu] v[s,x,mu,nu] for the AO matrices v of the block, per AO
+        for s in (0, 1):
+            if cpos is not None:
+                if cpos[s].shape[1] == 0:
+                    continue
+                c = cupy.take(cpos[s], idx, axis=0)
+                fac = None if xctype == 'LDA' else rks_grad._exc1_rho(ao, c, xctype, fac_buf)[1]
+                exc1_blk = rks_grad._exc1_ao_dots(ao, c, split_wv[s], xctype, fac, dot_buf)
+            else:
+                dm_masked = take_last2d(dms[s], idx, out=dm_mask_buf)
+                exc1_blk = rks_grad._exc1_ao_dots_dm(ao, dm_masked, split_wv[s], xctype)
+            exc1_ao[idx] += exc1_blk.T
+            de_grid_response_rho[i_atom] += exc1_blk.sum(axis=1) * 2
 
         g0 = g1
     assert g1 == ngrids
@@ -352,7 +338,7 @@ def get_exc_full_response(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
     excsum = de_grid_response_weight + de_grid_response_rho
     excsum = excsum.get()
     # - sign because nabla_X = -nabla_x
-    excsum -= rhf_grad.contract_h1e_dm(opt._sorted_mol, dvmat_orbital_response, dms, hermi=1)
+    excsum -= rks_grad._sum_exc1_ao_to_atoms(opt._sorted_mol, exc1_ao)
 
     log.timer_debug1('rks grad vxc full response', *t0)
     return excsum, 0
