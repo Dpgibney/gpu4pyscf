@@ -11024,8 +11024,12 @@ static int md_j_grid_x(int npairs_ij, int tilex_max, int grid_y, int diagonal)
     int nbatch = (npairs_ij + 15) / 16;
     int gx = (nbatch + tilex_max - 1) / tilex_max;
     int want = MD_J_BLOCKS_PER_SM * n_sm * (diagonal ? 2 : 1);
-    if (gx * grid_y < want) {
+    if (gx * grid_y < want && nbatch > 0) {
         gx = std::min(nbatch, (want + grid_y - 1) / grid_y);
+        // only as many blocks as the kernel's tiles of ceil(nbatch / gridDim.x) batches fill: a block past
+        // the last tile would read q_cond_ij past its end before returning
+        int tilex = (nbatch + gx - 1) / gx;
+        gx = (nbatch + tilex - 1) / tilex;
     }
     return std::max(gx, 1);
 }
