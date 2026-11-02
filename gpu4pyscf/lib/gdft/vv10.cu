@@ -250,62 +250,159 @@ static void vv10_grad_eval_E_grid_response_offdiagonal_kernel(double* __restrict
     Egr[B_atom * 3 * ngrids + 2 * ngrids + i_unoffset] = 1.5 * Egr_i.z;
 }
 
+// part 29: U, W, A, B, C, E over each pair of points once (part 26's rotation; the outputs zeroed before, scaled after)
 __global__
-static void vv10_hess_eval_UWABCE_kernel(double* __restrict__ U, double* __restrict__ W, double* __restrict__ A, double* __restrict__ B, double* __restrict__ C, double* __restrict__ E,
-                                         const double* __restrict__ grid_coord, const double* __restrict__ rho_weight,
-                                         const double* __restrict__ omega, const double* __restrict__ kappa,
-                                         const int ngrids)
+static void vv10_hess_eval_UWABCE_rot_kernel(double* __restrict__ U, double* __restrict__ W, double* __restrict__ A,
+                                             double* __restrict__ B, double* __restrict__ C, double* __restrict__ E,
+                                             const double* __restrict__ grid_coord, const double* __restrict__ rho_weight,
+                                             const double* __restrict__ omega, const double* __restrict__ kappa,
+                                             const int ngrids, const int jtiles)
+{
+    const int ntiles = (ngrids + VV10_TILE - 1) / VV10_TILE;
+    const int I = blockIdx.x;
+    const int J0 = I + blockIdx.y * jtiles;
+    if (J0 >= ntiles) {
+        return;
+    }
+    const int J1 = min(J0 + jtiles, ntiles);
+    const int t = threadIdx.x;
+    const int lane = t % 32;
+    const int warp = t / 32;
+    const int i = I * VV10_TILE + t;
+    double omega_i = 1., kappa_i = 1., rho_weight_i = 0.;
+    double3 r_i = {0., 0., 0.};
+    if (i < ngrids) {
+        omega_i = omega[i];
+        kappa_i = kappa[i];
+        rho_weight_i = rho_weight[i];
+        r_i.x = grid_coord[i * 3 + 0];
+        r_i.y = grid_coord[i * 3 + 1];
+        r_i.z = grid_coord[i * 3 + 2];
+    }
+    double U_i = 0, W_i = 0, A_i = 0, B_i = 0, C_i = 0, E_i = 0;
+
+    __shared__ double s_x[VV10_TILE], s_y[VV10_TILE], s_z[VV10_TILE];
+    __shared__ double s_o[VV10_TILE], s_k[VV10_TILE], s_w[VV10_TILE];
+    __shared__ double s_acc[VV10_WARPS][6][VV10_TILE];
+    const int next = (lane + 1) % 32;
+
+    for (int J = J0; J < J1; J++) {
+        const int jt = J * VV10_TILE + t;
+        if (jt < ngrids) {
+            s_x[t] = grid_coord[jt * 3 + 0];
+            s_y[t] = grid_coord[jt * 3 + 1];
+            s_z[t] = grid_coord[jt * 3 + 2];
+            s_o[t] = omega[jt];
+            s_k[t] = kappa[jt];
+            s_w[t] = rho_weight[jt];
+        } else {
+            s_x[t] = 0.; s_y[t] = 0.; s_z[t] = 0.;
+            s_o[t] = 1.; s_k[t] = 1.; s_w[t] = 0.;
+        }
+        __syncthreads();
+        const bool diag = J == I;
+        for (int c = 0; c < VV10_WARPS; c++) {
+            double U_j = 0, W_j = 0, A_j = 0, B_j = 0, C_j = 0, E_j = 0;
+            // in a diagonal tile the chunks below this warp's are the other warps' (j > i there)
+            if (!diag || c >= warp) {
+                for (int s = 0; s < 32; s++) {
+                    const int jj = c * 32 + (lane + s) % 32;
+                    const double dx = r_i.x - s_x[jj];
+                    const double dy = r_i.y - s_y[jj];
+                    const double dz = r_i.z - s_z[jj];
+                    const double omega_j = s_o[jj];
+                    const double kappa_j = s_k[jj];
+                    const double rho_weight_j = s_w[jj];
+                    const double r_ij2 = dx * dx + dy * dy + dz * dz;
+                    const double g_ij = omega_i * r_ij2 + kappa_i;
+                    const double g_ji = omega_j * r_ij2 + kappa_j;
+                    const double g_sum = g_ij + g_ji;
+                    const double g_ij_ji_sum_1 = 1 / (g_ij * g_ji * g_sum);
+                    const double Phi_ij = -g_ij_ji_sum_1;
+                    // the i side: j >= i in a diagonal tile (j == i once); the j side: j > i there
+                    if (!diag || jj >= t) {
+                        const double g_ij_sum_1 = g_ji * g_ij_ji_sum_1;
+                        const double E_ij = rho_weight_j * Phi_ij;
+                        const double U_ij = E_ij * (g_ij + g_sum) * g_ij_sum_1;
+                        const double A_ij = E_ij * (g_ij * g_ij + g_ij * g_sum + g_sum * g_sum) * g_ij_sum_1 * g_ij_sum_1;
+                        const double B_ij = A_ij * r_ij2;
+                        U_i += U_ij;
+                        W_i += U_ij * r_ij2;
+                        A_i += A_ij;
+                        B_i += B_ij;
+                        C_i += B_ij * r_ij2;
+                        E_i += E_ij;
+                    }
+                    if (!diag || jj > t) {
+                        const double g_ji_sum_1 = g_ij * g_ij_ji_sum_1;
+                        const double E_ji = rho_weight_i * Phi_ij;
+                        const double U_ji = E_ji * (g_ji + g_sum) * g_ji_sum_1;
+                        const double A_ji = E_ji * (g_ji * g_ji + g_ji * g_sum + g_sum * g_sum) * g_ji_sum_1 * g_ji_sum_1;
+                        const double B_ji = A_ji * r_ij2;
+                        U_j += U_ji;
+                        W_j += U_ji * r_ij2;
+                        A_j += A_ji;
+                        B_j += B_ji;
+                        C_j += B_ji * r_ij2;
+                        E_j += E_ji;
+                    }
+                    // the sums of the j this lane meets next, from the lane that has it now
+                    U_j = __shfl_sync(0xffffffff, U_j, next);
+                    W_j = __shfl_sync(0xffffffff, W_j, next);
+                    A_j = __shfl_sync(0xffffffff, A_j, next);
+                    B_j = __shfl_sync(0xffffffff, B_j, next);
+                    C_j = __shfl_sync(0xffffffff, C_j, next);
+                    E_j = __shfl_sync(0xffffffff, E_j, next);
+                }
+            }
+            // after 32 steps the sums of j = c*32 + lane are back on this lane
+            s_acc[warp][0][c * 32 + lane] = U_j;
+            s_acc[warp][1][c * 32 + lane] = W_j;
+            s_acc[warp][2][c * 32 + lane] = A_j;
+            s_acc[warp][3][c * 32 + lane] = B_j;
+            s_acc[warp][4][c * 32 + lane] = C_j;
+            s_acc[warp][5][c * 32 + lane] = E_j;
+        }
+        __syncthreads();
+        if (jt < ngrids) {
+            double sum[6] = {0, 0, 0, 0, 0, 0};
+            for (int k = 0; k < VV10_WARPS; k++) {
+                for (int q = 0; q < 6; q++) {
+                    sum[q] += s_acc[k][q][t];
+                }
+            }
+            atomicAdd(U + jt, sum[0]);
+            atomicAdd(W + jt, sum[1]);
+            atomicAdd(A + jt, sum[2]);
+            atomicAdd(B + jt, sum[3]);
+            atomicAdd(C + jt, sum[4]);
+            atomicAdd(E + jt, sum[5]);
+        }
+        __syncthreads();
+    }
+    if (i < ngrids) {
+        atomicAdd(U + i, U_i);
+        atomicAdd(W + i, W_i);
+        atomicAdd(A + i, A_i);
+        atomicAdd(B + i, B_i);
+        atomicAdd(C + i, C_i);
+        atomicAdd(E + i, E_i);
+    }
+}
+
+__global__
+static void vv10_scale_UWABCE_kernel(double* __restrict__ U, double* __restrict__ W, double* __restrict__ A,
+                                     double* __restrict__ B, double* __restrict__ C, double* __restrict__ E, const int ngrids)
 {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= ngrids)
-        return;
-
-    const double omega_i = omega[i];
-    const double kappa_i = kappa[i];
-    const double3 r_i = { grid_coord[i * 3 + 0], grid_coord[i * 3 + 1], grid_coord[i * 3 + 2] };
-
-    double U_i = 0;
-    double W_i = 0;
-    double A_i = 0;
-    double B_i = 0;
-    double C_i = 0;
-    double E_i = 0;
-
-    for (int j = 0; j < ngrids; j++) {
-        const double omega_j = omega[j];
-        const double kappa_j = kappa[j];
-        const double3 r_j = { grid_coord[j * 3 + 0], grid_coord[j * 3 + 1], grid_coord[j * 3 + 2] };
-        const double rho_weight_j = rho_weight[j];
-
-        const double r_ij2 = (r_i.x - r_j.x) * (r_i.x - r_j.x) + (r_i.y - r_j.y) * (r_i.y - r_j.y) + (r_i.z - r_j.z) * (r_i.z - r_j.z);
-        const double g_ij = omega_i * r_ij2 + kappa_i;
-        const double g_ji = omega_j * r_ij2 + kappa_j;
-        const double g_sum = g_ij + g_ji;
-        const double g_ij_ji_sum_1 = 1 / (g_ij * g_ji * g_sum);
-        const double Phi_ij = -g_ij_ji_sum_1; // Prefactor of 1.5 is applied later
-        const double g_ij_sum_1 = g_ji * g_ij_ji_sum_1;
-
-        const double E_ij = rho_weight_j * Phi_ij;
-        const double U_ij = E_ij * (g_ij + g_sum) * g_ij_sum_1;
-        const double W_ij = U_ij * r_ij2;
-        const double A_ij = E_ij * (g_ij * g_ij + g_ij * g_sum + g_sum * g_sum) * g_ij_sum_1 * g_ij_sum_1;
-        const double B_ij = A_ij * r_ij2;
-        const double C_ij = B_ij * r_ij2;
-
-        U_i += U_ij;
-        W_i += W_ij;
-        A_i += A_ij;
-        B_i += B_ij;
-        C_i += C_ij;
-        E_i += E_ij;
+    if (i < ngrids) {
+        U[i] *= -1.5;
+        W[i] *= -1.5;
+        A[i] *= 1.5 * 2;
+        B[i] *= 1.5 * 2;
+        C[i] *= 1.5 * 2;
+        E[i] *= 1.5;
     }
-
-    U[i] = -1.5 * U_i;
-    W[i] = -1.5 * W_i;
-    A[i] = (1.5 * 2) * A_i;
-    B[i] = (1.5 * 2) * B_i;
-    C[i] = (1.5 * 2) * C_i;
-    E[i] = 1.5 * E_i;
 }
 
 __global__
@@ -345,19 +442,23 @@ static void vv10_hess_eval_omega_derivative_kernel(double* __restrict__ omega, d
                                                     + 2 * C_factor * gamma2 * rho_4 * rho_5) * omega_3;
 }
 
+// part 29: the same pair matrix, with w_j folded in, for up to 36 trials per thread
 template <int n_trial_per_thread>
 __global__
-static void vv10_hess_eval_f_t_offdiagonal_kernel(double* __restrict__ f_rho_t, double* __restrict__ f_gamma_t,
-                                                  const double* __restrict__ grid_coord, const double* __restrict__ grid_weight,
-                                                  const double* __restrict__ rho, const double* __restrict__ omega, const double* __restrict__ kappa,
-                                                  const double* __restrict__ domega_drho, const double* __restrict__ domega_dgamma, const double* __restrict__ dkappa_drho,
-                                                  const double* __restrict__ rho_t, const double* __restrict__ gamma_t,
-                                                  const int ngrids, const int ntrial)
+static void vv10_hess_eval_f_t_offdiagonal_wide_kernel(double* __restrict__ f_rho_t, double* __restrict__ f_gamma_t,
+                                                       const double* __restrict__ grid_coord, const double* __restrict__ grid_weight,
+                                                       const double* __restrict__ rho, const double* __restrict__ omega, const double* __restrict__ kappa,
+                                                       const double* __restrict__ domega_drho, const double* __restrict__ domega_dgamma, const double* __restrict__ dkappa_drho,
+                                                       const double* __restrict__ rho_t, const double* __restrict__ gamma_t,
+                                                       const int ngrids, const int ntrial)
 {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const int i_trial_start = (blockIdx.y * blockDim.y + threadIdx.y) * n_trial_per_thread;
-    if (i >= ngrids || i_trial_start >= ntrial)
+    const int i_trial_start = blockIdx.y * n_trial_per_thread;
+    if (i >= ngrids)
         return;
+    const int n_trial_here = min(n_trial_per_thread, ntrial - i_trial_start);
+    rho_t += i_trial_start * ngrids;
+    gamma_t += i_trial_start * ngrids;
 
     const double omega_i = omega[i];
     const double kappa_i = kappa[i];
@@ -370,11 +471,6 @@ static void vv10_hess_eval_f_t_offdiagonal_kernel(double* __restrict__ f_rho_t, 
 
     double f_rho_t_i[n_trial_per_thread] {0};
     double f_gamma_t_i[n_trial_per_thread] {0};
-    // #pragma unroll
-    // for (int i_trial = 0; i_trial < n_trial_per_thread; i_trial++) {
-    //     f_rho_t_i  [i_trial] = 0;
-    //     f_gamma_t_i[i_trial] = 0;
-    // }
 
     for (int j = 0; j < ngrids; j++) {
         const double omega_j = omega[j];
@@ -401,32 +497,37 @@ static void vv10_hess_eval_f_t_offdiagonal_kernel(double* __restrict__ f_rho_t, 
         const double rho_dgdrho_j = rho_j * (r_ij2 * domega_drho_j + dkappa_drho_j);
         const double d2Phi_dgij_dgji_over_Phi = 2 * (g_sum_1 * g_sum_1 + g_ij_ji_1);
 
-        const double f_rho_rho_ij = Phi_ij * (rho_dgdrho_i * rho_dgdrho_j * d2Phi_dgij_dgji_over_Phi
-                                              - rho_dgdrho_i * (g_sum_1 + g_ij_1)
-                                              - rho_dgdrho_j * (g_sum_1 + g_ji_1) + 1);
-        const double rho_domegadgamma_i_rij2 = rho_i * domega_dgamma_i * r_ij2;
-        const double f_gamma_rho_ij = rho_domegadgamma_i_rij2 * Phi_ij * (rho_dgdrho_j * d2Phi_dgij_dgji_over_Phi - (g_sum_1 + g_ij_1));
-        const double rho_domegadgamma_j_rij2 = rho_j * domega_dgamma_j * r_ij2;
-        const double f_rho_gamma_ij = rho_domegadgamma_j_rij2 * Phi_ij * (rho_dgdrho_i * d2Phi_dgij_dgji_over_Phi - (g_sum_1 + g_ji_1));
-        const double f_gamma_gamma_ij = rho_domegadgamma_i_rij2 * rho_domegadgamma_j_rij2 * Phi_ij * d2Phi_dgij_dgji_over_Phi;
-
+        // the pair matrix times w_j
         const double weight_j = grid_weight[j];
+        const double w_Phi_ij = weight_j * Phi_ij;
+        const double f_rho_rho_ij = w_Phi_ij * (rho_dgdrho_i * rho_dgdrho_j * d2Phi_dgij_dgji_over_Phi
+                                                - rho_dgdrho_i * (g_sum_1 + g_ij_1)
+                                                - rho_dgdrho_j * (g_sum_1 + g_ji_1) + 1);
+        const double rho_domegadgamma_i_rij2 = rho_i * domega_dgamma_i * r_ij2;
+        const double f_gamma_rho_ij = rho_domegadgamma_i_rij2 * w_Phi_ij * (rho_dgdrho_j * d2Phi_dgij_dgji_over_Phi - (g_sum_1 + g_ij_1));
+        const double rho_domegadgamma_j_rij2 = rho_j * domega_dgamma_j * r_ij2;
+        const double f_rho_gamma_ij = rho_domegadgamma_j_rij2 * w_Phi_ij * (rho_dgdrho_i * d2Phi_dgij_dgji_over_Phi - (g_sum_1 + g_ji_1));
+        const double f_gamma_gamma_ij = rho_domegadgamma_i_rij2 * rho_domegadgamma_j_rij2 * w_Phi_ij * d2Phi_dgij_dgji_over_Phi;
 
         #pragma unroll
         for (int i_trial = 0; i_trial < n_trial_per_thread; i_trial++) {
-            if (i_trial + i_trial_start >= ntrial) continue;
-            const double   rho_t_j =   rho_t[(i_trial + i_trial_start) * ngrids + j];
-            const double gamma_t_j = gamma_t[(i_trial + i_trial_start) * ngrids + j];
-            f_rho_t_i  [i_trial] += weight_j * (  f_rho_rho_ij * rho_t_j +   f_rho_gamma_ij * gamma_t_j);
-            f_gamma_t_i[i_trial] += weight_j * (f_gamma_rho_ij * rho_t_j + f_gamma_gamma_ij * gamma_t_j);
+            if (i_trial < n_trial_here) {
+                const double   rho_t_j =   rho_t[i_trial * ngrids + j];
+                const double gamma_t_j = gamma_t[i_trial * ngrids + j];
+                f_rho_t_i  [i_trial] = fma(  f_rho_rho_ij, rho_t_j, fma(  f_rho_gamma_ij, gamma_t_j,   f_rho_t_i[i_trial]));
+                f_gamma_t_i[i_trial] = fma(f_gamma_rho_ij, rho_t_j, fma(f_gamma_gamma_ij, gamma_t_j, f_gamma_t_i[i_trial]));
+            }
         }
     }
 
+    f_rho_t += i_trial_start * ngrids;
+    f_gamma_t += i_trial_start * ngrids;
     #pragma unroll
     for (int i_trial = 0; i_trial < n_trial_per_thread; i_trial++) {
-        if (i_trial + i_trial_start >= ntrial) continue;
-        f_rho_t  [(i_trial + i_trial_start) * ngrids + i] = 1.5 * f_rho_t_i  [i_trial];
-        f_gamma_t[(i_trial + i_trial_start) * ngrids + i] = 1.5 * f_gamma_t_i[i_trial];
+        if (i_trial < n_trial_here) {
+            f_rho_t  [i_trial * ngrids + i] = 1.5 * f_rho_t_i  [i_trial];
+            f_gamma_t[i_trial * ngrids + i] = 1.5 * f_gamma_t_i[i_trial];
+        }
     }
 }
 
@@ -918,10 +1019,20 @@ int VXC_vv10nlc_hess_eval_UWABCE(const cudaStream_t stream,
                                  const double* omega, const double* kappa,
                                  const int ngrids)
 {
-    const dim3 threads(NG_PER_BLOCK);
-    const dim3 blocks((ngrids+NG_PER_BLOCK-1)/NG_PER_BLOCK);
-    vv10_hess_eval_UWABCE_kernel<<<blocks, threads, 0, stream>>>(U, W, A, B, C, E,
-                                                                 grid_coord, rho_weight, omega, kappa, ngrids);
+    // each pair of points once (part 29): the kernel sums into U, W, A, B, C, E, vv10_scale_UWABCE_kernel applies
+    // the factors
+    if (ngrids <= 0) {
+        return 0;
+    }
+    double* outputs[6] = {U, W, A, B, C, E};
+    for (double* x : outputs) {
+        cudaMemsetAsync(x, 0, ngrids * sizeof(double), stream);
+    }
+    const int ntiles = (ngrids + VV10_TILE - 1) / VV10_TILE;
+    const dim3 blocks(ntiles, (ntiles + VV10_JTILES - 1) / VV10_JTILES);
+    vv10_hess_eval_UWABCE_rot_kernel<<<blocks, VV10_TILE, 0, stream>>>(U, W, A, B, C, E, grid_coord, rho_weight,
+                                                                       omega, kappa, ngrids, VV10_JTILES);
+    vv10_scale_UWABCE_kernel<<<(ngrids + 255) / 256, 256, 0, stream>>>(U, W, A, B, C, E, ngrids);
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA Error of vv10 hess eval_UWABCE: %s\n", cudaGetErrorString(err));
@@ -961,17 +1072,26 @@ int VXC_vv10nlc_hess_eval_f_t(const cudaStream_t stream,
                               const double* rho_t, const double* gamma_t,
                               const int ngrids, const int ntrial)
 {
-    {
-        constexpr int n_trial_per_thread = 6; // Notice: ntrial is likely a multiple of 3
+    if (ntrial > 0) {
+        // up to 36 trials per thread (part 29), so that each pair's matrix serves that many: the fewest chunks
+        // of at most 36 trials, each a multiple of 6
+        const int n_chunk = (ntrial + 35) / 36;
+        const int n_trial_per_thread = ((ntrial + n_chunk - 1) / n_chunk + 5) / 6 * 6;
         const dim3 threads(NG_PER_BLOCK, 1);
         const dim3 blocks((ngrids + NG_PER_BLOCK - 1) / NG_PER_BLOCK,
-                        (ntrial + n_trial_per_thread - 1) / n_trial_per_thread);
-        vv10_hess_eval_f_t_offdiagonal_kernel<n_trial_per_thread> <<<blocks, threads, 0, stream>>> (
-            f_rho_t, f_gamma_t,
-            grid_coord, grid_weight, rho, omega, kappa,
-            domega_drho, domega_dgamma, dkappa_drho,
-            rho_t, gamma_t, ngrids, ntrial
-        );
+                          (ntrial + n_trial_per_thread - 1) / n_trial_per_thread);
+#define F_T_OFFDIAGONAL(n) vv10_hess_eval_f_t_offdiagonal_wide_kernel<n> <<<blocks, threads, 0, stream>>> ( \
+            f_rho_t, f_gamma_t, grid_coord, grid_weight, rho, omega, kappa, \
+            domega_drho, domega_dgamma, dkappa_drho, rho_t, gamma_t, ngrids, ntrial)
+        switch (n_trial_per_thread) {
+            case 6: F_T_OFFDIAGONAL(6); break;
+            case 12: F_T_OFFDIAGONAL(12); break;
+            case 18: F_T_OFFDIAGONAL(18); break;
+            case 24: F_T_OFFDIAGONAL(24); break;
+            case 30: F_T_OFFDIAGONAL(30); break;
+            default: F_T_OFFDIAGONAL(36); break;
+        }
+#undef F_T_OFFDIAGONAL
     }
     {
         const dim3 threads(NG_PER_BLOCK);
@@ -1021,15 +1141,24 @@ int VXC_vv10nlc_hess_eval_EUW_with_weight1(const cudaStream_t stream,
                                            const double* rho, const double* omega, const double* kappa,
                                            const int ngrids, const int nderivative)
 {
-    constexpr int n_derivative_per_thread = 6; // Notice: ntrial is always a multiple of 3
-    const dim3 threads(NG_PER_BLOCK, 1);
-    const dim3 blocks((ngrids + NG_PER_BLOCK - 1) / NG_PER_BLOCK,
-                      (nderivative + n_derivative_per_thread - 1) / n_derivative_per_thread);
-    vv10_hess_eval_EUW_with_weight1_kernel<n_derivative_per_thread> <<<blocks, threads, 0, stream>>> (
-        Ew, Uw, Ww,
-        grid_coord, grid_weight1, rho, omega, kappa,
-        ngrids, nderivative
-    );
+    if (nderivative > 0) {
+        // up to 24 derivatives per thread (part 29), so that each pair serves that many: the fewest chunks of
+        // at most 24, each a multiple of 6 (with three sums per derivative, 36 would not fit in the registers)
+        const int n_chunk = (nderivative + 23) / 24;
+        const int n_derivative_per_thread = ((nderivative + n_chunk - 1) / n_chunk + 5) / 6 * 6;
+        const dim3 threads(NG_PER_BLOCK, 1);
+        const dim3 blocks((ngrids + NG_PER_BLOCK - 1) / NG_PER_BLOCK,
+                          (nderivative + n_derivative_per_thread - 1) / n_derivative_per_thread);
+#define EUW_WITH_WEIGHT1(n) vv10_hess_eval_EUW_with_weight1_kernel<n> <<<blocks, threads, 0, stream>>> ( \
+            Ew, Uw, Ww, grid_coord, grid_weight1, rho, omega, kappa, ngrids, nderivative)
+        switch (n_derivative_per_thread) {
+            case 6: EUW_WITH_WEIGHT1(6); break;
+            case 12: EUW_WITH_WEIGHT1(12); break;
+            case 18: EUW_WITH_WEIGHT1(18); break;
+            default: EUW_WITH_WEIGHT1(24); break;
+        }
+#undef EUW_WITH_WEIGHT1
+    }
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA Error of vv10 hess eval_EUW_with_weight1: %s\n", cudaGetErrorString(err));
