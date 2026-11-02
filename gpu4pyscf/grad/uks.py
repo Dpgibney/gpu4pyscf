@@ -111,20 +111,20 @@ def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
     ''' Calculate the gradient of vxc on given device
     '''
     with cupy.cuda.Device(device_id):
-        if dms is not None: dms = cupy.asarray(dms)
-        if mo_coeff is not None: mo_coeff = cupy.asarray(mo_coeff)
-        if mo_occ is not None: mo_occ = cupy.asarray(mo_occ)
+        mo_coeff = cupy.asarray(mo_coeff)
+        mo_occ = cupy.asarray(mo_occ)
 
         log = logger.new_logger(mol)
         t0 = log.init_timer()
         xctype = ni._xc_type(xc_code)
+        if xctype == 'NLC':
+            raise NotImplementedError('NLC')
         nao = mol.nao
         opt = ni.gdftopt
         _sorted_mol = opt._sorted_mol
-
-        nocc_a = cupy.count_nonzero(mo_occ[0]>0)
-        nocc_b = cupy.count_nonzero(mo_occ[1]>0)
-        nocc = max(nocc_a, nocc_b)
+        # dm[s] = cpos[s] cpos[s]^T, as in the density (dms only carries the orbitals)
+        cpos = [mo_coeff[s][:,mo_occ[s]>0] * mo_occ[s][mo_occ[s]>0]**.5 for s in (0, 1)]
+        nocc = max(c.shape[1] for c in cpos)
 
         ngrids_glob = grids.coords.shape[0]
         grid_start, grid_end = numint.gen_grid_range(ngrids_glob, device_id)
@@ -132,6 +132,8 @@ def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
         log.debug(f"{ngrids_local} grids on Device {device_id}")
 
         exc1 = cupy.zeros((nao, 3))
+        if xctype == 'HF':
+            return exc1
 
         if xctype == 'LDA':
             ncomp = 1
@@ -139,89 +141,33 @@ def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
             ncomp = 4
         else:
             ncomp = 5
-        rho_buf = cupy.empty(2*ncomp*MIN_BLK_SIZE)
-        mo_buf = cupy.empty_like(mo_coeff[0])
-        vtmp_buf = cupy.empty((3, nao, nao))
+        ao_deriv = 1 if xctype == 'LDA' else 2
+        blksize = numint.MIN_BLK_SIZE
+        rho_buf = cupy.empty(2*ncomp*blksize)
+        cpos_buf = [cupy.empty_like(c) for c in cpos]
+        fac_buf = [cupy.empty(rks_grad._exc1_rho_bufsize(xctype, nao, nocc) * blksize)
+                   for s in (0, 1)]
+        dot_buf = cupy.empty(rks_grad._exc1_ao_dots_bufsize(xctype, nao, nocc) * blksize)
+        for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
+                                                     grid_range=(grid_start, grid_end)):
+            blk_size = len(weight)
+            rho = ndarray((2, ncomp, blk_size), buffer=rho_buf)
+            c = [cupy.take(cpos[s], idx, axis=0, out=cpos_buf[s][:len(idx)]) for s in (0, 1)]
+            fac = [rks_grad._exc1_rho(ao_mask, c[s], xctype, fac_buf[s], rho=rho[s])[1]
+                   for s in (0, 1)]
 
-        dm_mask_buf = cupy.empty(nao*nao)
-
-        if xctype == 'LDA':
-            ao_deriv = 1
-            aow_buf = cupy.empty(MIN_BLK_SIZE * max(nao, 1*nocc))
-            for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
-                                                         grid_range=(grid_start, grid_end)):
-                blk_size = len(weight)
-                nao_sub = len(idx)
-                rho = ndarray((2, ncomp, blk_size), buffer=rho_buf)
-                mo_coeff_mask = cupy.take(mo_coeff[0], idx, axis=0, out=mo_buf[:nao_sub])
-                eval_rho2(_sorted_mol, ao_mask[0], mo_coeff_mask, mo_occ[0], None, xctype, buf=aow_buf, out=rho[0])
-                mo_coeff_mask = cupy.take(mo_coeff[1], idx, axis=0, out=mo_buf[:nao_sub])
-                eval_rho2(_sorted_mol, ao_mask[0], mo_coeff_mask, mo_occ[1], None, xctype, buf=aow_buf, out=rho[1])
-
-                vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=1)[1][:,0]
-                wv = cupy.multiply(weight, vxc, out=vxc)
-                aow = numint._scale_ao(ao_mask[0], wv[0], out=aow_buf)
-                vtmp = rks_grad._d1_dot_(ao_mask[1:4], aow.T, out=vtmp_buf)
-                dm_mask = take_last2d(dms[0], idx, out=dm_mask_buf)
-                exc1[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
-                aow = numint._scale_ao(ao_mask[0], wv[1], out=aow)
-                vtmp = rks_grad._d1_dot_(ao_mask[1:4], aow.T, out=vtmp_buf)
-                dm_mask = take_last2d(dms[1], idx, out=dm_mask)
-                exc1[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
-        elif xctype == 'GGA':
-            ao_deriv = 2
-            aow_buf = cupy.empty(MIN_BLK_SIZE * max(nao * 3, 2*nocc))
-            for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
-                                                         grid_range=(grid_start, grid_end)):
-                blk_size = len(weight)
-                nao_sub = len(idx)
-                rho = ndarray((2, ncomp, blk_size), buffer=rho_buf)
-                mo_coeff_mask = cupy.take(mo_coeff[0], idx, axis=0, out=mo_buf[:nao_sub])
-                eval_rho2(_sorted_mol, ao_mask[:4], mo_coeff_mask, mo_occ[0], None, xctype, buf=aow_buf, out=rho[0])
-                mo_coeff_mask = cupy.take(mo_coeff[1], idx, axis=0, out=mo_buf[:nao_sub])
-                eval_rho2(_sorted_mol, ao_mask[:4], mo_coeff_mask, mo_occ[1], None, xctype, buf=aow_buf, out=rho[1])
-
-                vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=1)[1]
-                wv = cupy.multiply(weight, vxc, out=vxc)
+            vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=1, work=dot_buf)[1]
+            wv = cupy.multiply(weight, vxc, out=vxc)
+            if xctype == 'LDA':
+                wv = wv[:,0]
+            else:
                 wv[:,0] *= .5
-                vtmp = rks_grad._gga_grad_sum_(ao_mask, wv[0], buf=aow_buf, out=vtmp_buf)
-                #add_sparse(vmat[0], vtmp, idx)
-                dm_mask = take_last2d(dms[0], idx, out=dm_mask_buf)
-                exc1[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
-                vtmp = rks_grad._gga_grad_sum_(ao_mask, wv[1], buf=aow_buf, out=vtmp_buf)
-                #add_sparse(vmat[1], vtmp, idx)
-                dm_mask = take_last2d(dms[1], idx, out=dm_mask)
-                exc1[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
-        elif xctype == 'NLC':
-            raise NotImplementedError('NLC')
-
-        elif xctype == 'MGGA':
-            ao_deriv = 2
-            aow_buf = cupy.empty(MIN_BLK_SIZE * max(nao * 3, 2*nocc))
-            for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
-                                                         grid_range=(grid_start, grid_end)):
-                blk_size = len(weight)
-                nao_sub = len(idx)
-                rho = ndarray((2, ncomp, blk_size), buffer=rho_buf)
-                mo_coeff_mask = cupy.take(mo_coeff[0], idx, axis=0, out=mo_buf[:nao_sub])
-                eval_rho2(_sorted_mol, ao_mask[:4], mo_coeff_mask, mo_occ[0], None, xctype, buf=aow_buf, out=rho[0])
-                mo_coeff_mask = cupy.take(mo_coeff[1], idx, axis=0, out=mo_buf[:nao_sub])
-                eval_rho2(_sorted_mol, ao_mask[:4], mo_coeff_mask, mo_occ[1], None, xctype, buf=aow_buf, out=rho[1])
-
-                vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=1)[1]
-                wv = cupy.multiply(weight, vxc, out=vxc)
-                wv[:,0] *= .5
+            if xctype == 'MGGA':
                 wv[:,4] *= .5  # for the factor 1/2 in tau
-                vtmp = rks_grad._gga_grad_sum_(ao_mask, wv[0], buf=aow_buf, out=vtmp_buf)
-                vtmp = rks_grad._tau_grad_dot_(ao_mask, wv[0,4], accumulate=True, buf=aow_buf, out=vtmp)
-                #add_sparse(vmat[0], vtmp, idx)
-                dm_mask = take_last2d(dms[0], idx, out=dm_mask_buf)
-                exc1[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
-                vtmp = rks_grad._gga_grad_sum_(ao_mask, wv[1], buf=aow_buf, out=vtmp_buf)
-                vtmp = rks_grad._tau_grad_dot_(ao_mask, wv[1,4], accumulate=True, buf=aow_buf, out=vtmp)
-                #add_sparse(vmat[1], vtmp, idx)
-                dm_mask = take_last2d(dms[1], idx, out=dm_mask)
-                exc1[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
+            for s in (0, 1):
+                if c[s].shape[1] > 0:
+                    exc1[idx] += rks_grad._exc1_ao_dots(ao_mask, c[s], wv[s], xctype, fac[s],
+                                                        dot_buf).T
         log.timer_debug1('uks gradient of vxc', *t0)
     return exc1
 
