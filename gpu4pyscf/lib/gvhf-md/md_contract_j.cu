@@ -923,13 +923,15 @@ void md_j_4dm_kernel(RysIntEnvVars envs, JKMatrix jk, MDBoundsInfo bounds,
 
 int md_j_generated(RysIntEnvVars *envs, JKMatrix *jk, MDBoundsInfo *bounds,
                    float *q_cond_ij, float *q_cond_kl, double omega);
+int md_j_generated_ip1(RysIntEnvVars *envs, JKMatrix *jk, MDBoundsInfo *bounds,
+                       float *q_cond_ij, float *q_cond_kl, double omega);
 int md_j_unrolled(RysIntEnvVars *envs, JKMatrix *jk, MDBoundsInfo *bounds,
                   float *q_cond_ij, float *q_cond_kl, double omega);
 int md_j_4dm_unrolled(RysIntEnvVars *envs, JKMatrix *jk, MDBoundsInfo *bounds,
                   float *q_cond_ij, float *q_cond_kl, double omega, int dm_size);
 
 extern "C" {
-int MD_build_j(double *vj, double *dm, int n_dm, int dm_size,
+static int md_build_j(int lshift, double *vj, double *dm, int n_dm, int dm_size,
                 RysIntEnvVars *envs, int *scheme, int *shls_slice,
                 int npairs_ij, int npairs_kl,
                 int *pair_ij_mapping, int *pair_kl_mapping,
@@ -946,6 +948,9 @@ int MD_build_j(double *vj, double *dm, int n_dm, int dm_size,
     int lj = bas[ANG_OF + jsh0*BAS_SLOTS];
     int lk = bas[ANG_OF + ksh0*BAS_SLOTS];
     int ll = bas[ANG_OF + lsh0*BAS_SLOTS];
+    // MD_build_j_ip1: both pairs' Hermite potentials lshift orders above their densities
+    li += lshift;
+    lk += lshift;
     int lij = li + lj;
     int lkl = lk + ll;
     int order = lij + lkl;
@@ -985,7 +990,8 @@ int MD_build_j(double *vj, double *dm, int n_dm, int dm_size,
     pRt2_kl_ij += offset_for_Rt2_idx(lij, lkl);
     efg_phase += offset_for_Rt2_idx(0, lkl);
     if (n_dm == 1) {
-        if (!md_j_unrolled(envs, &jk, &bounds, q_cond_ij, q_cond_kl, omega) &&
+        if (!(lshift && md_j_generated_ip1(envs, &jk, &bounds, q_cond_ij, q_cond_kl, omega)) &&
+            !md_j_unrolled(envs, &jk, &bounds, q_cond_ij, q_cond_kl, omega) &&
             !md_j_generated(envs, &jk, &bounds, q_cond_ij, q_cond_kl, omega)) {
             cudaFuncSetAttribute(md_j_1dm_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, buflen);
             cudaError_t err = cudaGetLastError();
@@ -1027,5 +1033,33 @@ int MD_build_j(double *vj, double *dm, int n_dm, int dm_size,
         return 1;
     }
     return 0;
+}
+
+int MD_build_j(double *vj, double *dm, int n_dm, int dm_size,
+                RysIntEnvVars *envs, int *scheme, int *shls_slice,
+                int npairs_ij, int npairs_kl,
+                int *pair_ij_mapping, int *pair_kl_mapping,
+                int *pair_ij_loc, int *pair_kl_loc,
+                float *qd_ij_max, float *qd_kl_max,
+                float *q_cond_ij, float *q_cond_kl, float cutoff,
+                int *atm, int natm, int *bas, int nbas, double *env)
+{
+    return md_build_j(0, vj, dm, n_dm, dm_size, envs, scheme, shls_slice, npairs_ij, npairs_kl, pair_ij_mapping, pair_kl_mapping,
+                      pair_ij_loc, pair_kl_loc, qd_ij_max, qd_kl_max, q_cond_ij, q_cond_kl, cutoff, atm, natm, bas, nbas, env);
+}
+
+// The J engine's gradient: the Hermite potentials of both pairs one order above their densities, which
+// are given in that layout with their top-order components zero
+int MD_build_j_ip1(double *vj, double *dm, int n_dm, int dm_size,
+                RysIntEnvVars *envs, int *scheme, int *shls_slice,
+                int npairs_ij, int npairs_kl,
+                int *pair_ij_mapping, int *pair_kl_mapping,
+                int *pair_ij_loc, int *pair_kl_loc,
+                float *qd_ij_max, float *qd_kl_max,
+                float *q_cond_ij, float *q_cond_kl, float cutoff,
+                int *atm, int natm, int *bas, int nbas, double *env)
+{
+    return md_build_j(1, vj, dm, n_dm, dm_size, envs, scheme, shls_slice, npairs_ij, npairs_kl, pair_ij_mapping, pair_kl_mapping,
+                      pair_ij_loc, pair_kl_loc, qd_ij_max, qd_kl_max, q_cond_ij, q_cond_kl, cutoff, atm, natm, bas, nbas, env);
 }
 }
