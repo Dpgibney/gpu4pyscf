@@ -19,6 +19,7 @@
 Non-relativistic RKS analytical Hessian
 '''
 
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 import numpy
 import cupy
@@ -3794,41 +3795,29 @@ def nr_rks_fxc_mo(ni, mol, grids, xc_code, dm0=None, dms=None, mo_coeff=None, re
     t0 = log.timer_debug1('nr_rks_fxc', *t0)
     return cupy.asarray(vmat)
 
-def nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo = True):
-    """
-    Equation notation follows:
-    Liang J, Feng X, Liu X, Head-Gordon M. Analytical harmonic vibrational frequencies with
-    VV10-containing density functionals: Theory, efficient implementation, and
-    benchmark assessments. J Chem Phys. 2023 May 28;158(20):204109. doi: 10.1063/5.0152838.
+NLCResponseGroundState = namedtuple('NLCResponseGroundState', [
+    'grids', 'opt', 'rho_nonzero_mask', 'grids_coords', 'grids_weights', 'rho_i', 'nabla_rho_i',
+    'omega_i', 'domega_drho_i', 'domega_dgamma_i', 'd2omega_drho2_i', 'd2omega_dgamma2_i', 'd2omega_drho_dgamma_i',
+    'kappa_i', 'dkappa_drho_i', 'd2kappa_drho2_i', 'U_i', 'W_i', 'A_i', 'B_i', 'C_i', 'f_gamma_i'])
 
-    TODO: check the effect of different grid, using mf.nlcgrids right now
+def get_nlc_response_ground_state(mf, mol, mo_coeff, mo_occ, kept = None):
+    """
+    The part of nr_rks_fnlc_mo that depends only on the ground state: the NLC grid points with non-negligible
+    density, rho and its gradient there, omega, kappa and their derivatives, and the pair sums U, W, A, B, C.
+    It takes a pass over the grid's AOs and an all-pair kernel, so solvers that call nr_rks_fnlc_mo once per
+    cycle with the same orbitals build it once and pass it as ground_state.
 
     Args:
-        mo_coeff: array of shape (2, nao, nmo) or (nao, nmo)
-            0-th order RKS or UKS MO coefficients
-            mo_occ: array of shape (2, nmo) or (nmo,)
-            0-th order RKS or UKS MO occupancies
-        dm1s: array of shape (*, nao, nao)
-            Spin-traced first order density matrices
-        return_in_mo:
-            Whether to return NLC matrices in MO representations. When UKS
-            orbitals are supplied, a two-element tuple of matrices
-            (spin-up, spin-down) are evaluated and returned.
+        mo_coeff, mo_occ: as in nr_rks_fnlc_mo
+        kept: a list that keeps the ground state between calls. When given, the ground state is built into it
+            on the first call and taken from it after, so the list must belong to one set of orbitals.
     """
-    nao = mol.nao
-    output_in_2d = False
-    if dm1s.ndim == 2:
-        assert dm1s.shape == (nao, nao)
-        dm1s = dm1s.reshape((1, nao, nao))
-        output_in_2d = True
-    else:
-        assert dm1s.ndim == 3
+    if kept:
+        return kept[0]
 
     grids = mf.nlcgrids
     if grids.coords is None:
         grids.build()
-
-    n_dm1 = dm1s.shape[0]
 
     ni = mf._numint
     opt = getattr(ni, 'gdftopt', None)
@@ -3928,6 +3917,62 @@ def nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo = True):
     del E_i
 
     f_gamma_i = rho_i * domega_dgamma_i * W_i
+
+    ground_state = NLCResponseGroundState(
+        grids, opt, rho_nonzero_mask, grids_coords, grids_weights, rho_i, nabla_rho_i,
+        omega_i, domega_drho_i, domega_dgamma_i, d2omega_drho2_i, d2omega_dgamma2_i, d2omega_drho_dgamma_i,
+        kappa_i, dkappa_drho_i, d2kappa_drho2_i, U_i, W_i, A_i, B_i, C_i, f_gamma_i)
+    if kept is not None:
+        kept.append(ground_state)
+    return ground_state
+
+def nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo = True, ground_state = None):
+    """
+    Equation notation follows:
+    Liang J, Feng X, Liu X, Head-Gordon M. Analytical harmonic vibrational frequencies with
+    VV10-containing density functionals: Theory, efficient implementation, and
+    benchmark assessments. J Chem Phys. 2023 May 28;158(20):204109. doi: 10.1063/5.0152838.
+
+    TODO: check the effect of different grid, using mf.nlcgrids right now
+
+    Args:
+        mo_coeff: array of shape (2, nao, nmo) or (nao, nmo)
+            0-th order RKS or UKS MO coefficients
+            mo_occ: array of shape (2, nmo) or (nmo,)
+            0-th order RKS or UKS MO occupancies
+        dm1s: array of shape (*, nao, nao)
+            Spin-traced first order density matrices
+        return_in_mo:
+            Whether to return NLC matrices in MO representations. When UKS
+            orbitals are supplied, a two-element tuple of matrices
+            (spin-up, spin-down) are evaluated and returned.
+        ground_state:
+            The NLCResponseGroundState of these orbitals from get_nlc_response_ground_state, or None to build it
+            here.
+    """
+    nao = mol.nao
+    output_in_2d = False
+    if dm1s.ndim == 2:
+        assert dm1s.shape == (nao, nao)
+        dm1s = dm1s.reshape((1, nao, nao))
+        output_in_2d = True
+    else:
+        assert dm1s.ndim == 3
+
+    n_dm1 = dm1s.shape[0]
+
+    if ground_state is None:
+        ground_state = get_nlc_response_ground_state(mf, mol, mo_coeff, mo_occ)
+    (grids, opt, rho_nonzero_mask, grids_coords, grids_weights, rho_i, nabla_rho_i,
+     omega_i, domega_drho_i, domega_dgamma_i, d2omega_drho2_i, d2omega_dgamma2_i, d2omega_drho_dgamma_i,
+     kappa_i, dkappa_drho_i, d2kappa_drho2_i, U_i, W_i, A_i, B_i, C_i, f_gamma_i) = ground_state
+    ngrids_full = grids.coords.shape[0]
+    ngrids = grids_coords.shape[0]
+    ni = mf._numint
+    _sorted_mol = opt._sorted_mol
+    mol = None
+    mo_coeff = opt.sort_orbitals(mo_coeff, axis=[mo_coeff.ndim-2])
+    stream = cupy.cuda.get_current_stream()
 
     dm1s_sorted = opt.sort_orbitals(dm1s, axis=[1,2])
     dm_mask_buf = cupy.empty(nao * nao)
@@ -4075,6 +4120,23 @@ def nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo = True):
         vmat = vmat[0]
     return vmat
 
+def _gen_vind_keeping_nlc_ground_state(gen_vind):
+    '''gen_vind whose fx keeps the NLC response's ground-state part (get_nlc_response_ground_state) for all its
+    calls: get_veff_resp_mo builds it in the first CPHF cycle and finds it on the Hessian object while fx runs'''
+    def gen_vind_nlc(hessobj, mo_coeff, mo_occ):
+        fx = gen_vind(hessobj, mo_coeff, mo_occ)
+        if not hessobj.base.do_nlc():
+            return fx
+        kept = []
+        def fx_nlc(mo1):
+            hessobj._nlc_ground_state = kept
+            try:
+                return fx(mo1)
+            finally:
+                del hessobj._nlc_ground_state
+        return fx_nlc
+    return gen_vind_nlc
+
 def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1, omega=None):
     mol = hessobj.mol
     mf = hessobj.base
@@ -4105,7 +4167,10 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1, omega=None):
     v1 = v1.reshape(-1,nmo*nocc)
 
     if mf.do_nlc():
-        vnlc = nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dms)
+        # inside gen_vind's fx, the ground-state part kept for all CPHF cycles (built in the first)
+        ground_state = get_nlc_response_ground_state(mf, mol, mo_coeff, mo_occ,
+                                                     getattr(hessobj, '_nlc_ground_state', None))
+        vnlc = nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dms, ground_state=ground_state)
         v1 += vnlc.reshape(-1,nmo*nocc)
 
     if hybrid:
@@ -4145,7 +4210,7 @@ class Hessian(rhf_hess.HessianBase):
     partial_hess_elec = partial_hess_elec
     hess_elec = rhf_hess.hess_elec
     make_h1 = make_h1
-    gen_vind = rhf_hess.gen_vind
+    gen_vind = _gen_vind_keeping_nlc_ground_state(rhf_hess.gen_vind)
     get_jk_mo = rhf_hess._get_jk_mo
     get_veff_resp_mo = get_veff_resp_mo
 

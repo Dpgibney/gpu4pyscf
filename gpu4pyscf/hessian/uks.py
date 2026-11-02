@@ -25,7 +25,8 @@ from gpu4pyscf.hessian import rhf as rhf_hess
 from gpu4pyscf.hessian import uhf as uhf_hess
 from gpu4pyscf.hessian.rhf import _ao2mo
 from gpu4pyscf.hessian.rks import get_dweight_dA, get_d2weight_dAdB, get_d2mu_dr2, get_d3mu_dr3
-from gpu4pyscf.hessian.rks import _get_enlc_deriv2, _get_vnlc_deriv1, nr_rks_fnlc_mo
+from gpu4pyscf.hessian.rks import (_get_enlc_deriv2, _get_vnlc_deriv1, nr_rks_fnlc_mo, get_nlc_response_ground_state,
+                                   _gen_vind_keeping_nlc_ground_state)
 from gpu4pyscf.hessian.rks import (MIN_BLK_SIZE, _block_ao_subset, _d1_dot_pair, _d1d2_dot_gemm,
                                    _add_d1d2_, _dR_rho1_sub_blocks, _dR_rho1_terms, _atom_sums,
                                    _contract_rho1_fxc_rows, _dR_rho1_atoms, _add_atom_rows_)
@@ -1875,7 +1876,10 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1):
     v1vo[:,nmoa*nocca:] = _ao2mo(v1[1], moccb, mo_coeff[1]).reshape(-1,nmob*noccb)
 
     if mf.do_nlc():
-        vnlca, vnlcb = nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dms)
+        # inside gen_vind's fx, the ground-state part kept for all CPHF cycles (built in the first)
+        ground_state = get_nlc_response_ground_state(mf, mol, mo_coeff, mo_occ,
+                                                     getattr(hessobj, '_nlc_ground_state', None))
+        vnlca, vnlcb = nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dms, ground_state=ground_state)
         v1vo[:,:nmoa*nocca] += vnlca.reshape(-1, nmoa*nocca)
         v1vo[:,nmoa*nocca:] += vnlcb.reshape(-1, nmob*noccb)
 
@@ -1901,7 +1905,7 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1):
         v1vo += hessobj.get_jk_mo(mol, dms, mo_coeff, mo_occ, hermi=1, with_k=False)[0]
     return v1vo
 
-def nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo=True):
+def nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo=True, ground_state=None):
     """
     The UKS version of nr_rks_fnlc_mo
 
@@ -1916,9 +1920,11 @@ def nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo=True):
             Whether to return NLC matrices in MO representations. When UKS
             orbitals are supplied, a two-element tuple of matrices
             (spin-up, spin-down) are evaluated and returned.
+        ground_state:
+            As in nr_rks_fnlc_mo (built from both spins' orbitals)
     """
     assert mo_coeff.ndim == 3
-    return nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s[0]+dm1s[1], return_in_mo)
+    return nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s[0]+dm1s[1], return_in_mo, ground_state)
 
 class Hessian(rhf_hess.HessianBase):
     '''Non-relativistic UKS hessian'''
@@ -1932,7 +1938,7 @@ class Hessian(rhf_hess.HessianBase):
     solve_mo1 = uhf_hess.Hessian.solve_mo1
     partial_hess_elec = partial_hess_elec
     make_h1 = make_h1
-    gen_vind = uhf_hess.gen_vind
+    gen_vind = _gen_vind_keeping_nlc_ground_state(uhf_hess.gen_vind)
     get_jk_mo = uhf_hess._get_jk_mo
     get_veff_resp_mo = get_veff_resp_mo
 

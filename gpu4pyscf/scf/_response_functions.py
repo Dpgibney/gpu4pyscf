@@ -27,7 +27,7 @@ def _gen_rhf_response(mf, mo_coeff=None, mo_occ=None,
             orbital hessian or CPHF will be generated. If singlet is boolean,
             it is used in TDDFT response kernel.
     '''
-    from gpu4pyscf.hessian.rks import nr_rks_fnlc_mo
+    from gpu4pyscf.hessian.rks import nr_rks_fnlc_mo, get_nlc_response_ground_state
     if mo_coeff is None: mo_coeff = mf.mo_coeff
     if mo_occ is None: mo_occ = mf.mo_occ
     if not isinstance(mo_coeff, cupy.ndarray):
@@ -57,6 +57,7 @@ def _gen_rhf_response(mf, mo_coeff=None, mo_occ=None,
 
         if not with_nlc and mf.do_nlc():
             logger.warn(mf, "NLC contribution in gen_response is NOT included")
+        nlc_ground_state = [] # the NLC response's ground-state part, built by the first call that needs it
 
         if singlet is None:
             # Without specify singlet, used in ground state orbital hessian
@@ -68,7 +69,9 @@ def _gen_rhf_response(mf, mo_coeff=None, mo_occ=None,
                     v1 = ni.nr_rks_fxc(mol, grids, mf.xc, dm0, dm1, 0, hermi,
                                        rho0, vxc, fxc, max_memory=max_memory)
                     if with_nlc and mf.do_nlc():
-                        v1 += nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1, return_in_mo = False)
+                        ground_state = get_nlc_response_ground_state(mf, mol, mo_coeff, mo_occ, nlc_ground_state)
+                        v1 += nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1, return_in_mo = False,
+                                             ground_state = ground_state)
                 if hybrid:
                     if hermi != 2:
                         vj, vk = mf.get_jk(mol, dm1, hermi=hermi)
@@ -92,7 +95,9 @@ def _gen_rhf_response(mf, mo_coeff=None, mo_occ=None,
                     v1 = ni.nr_rks_fxc_st(mol, grids, mf.xc, dm0, dm1, 0, True,
                                           rho0, vxc, fxc, max_memory=max_memory)
                     if with_nlc and mf.do_nlc():
-                        v1 += nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1, return_in_mo = False)
+                        ground_state = get_nlc_response_ground_state(mf, mol, mo_coeff, mo_occ, nlc_ground_state)
+                        v1 += nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1, return_in_mo = False,
+                                             ground_state = ground_state)
                 if hybrid:
                     if hermi != 2:
                         vj, vk = mf.get_jk(mol, dm1, hermi=hermi)
@@ -142,6 +147,7 @@ def _gen_uhf_response(mf, mo_coeff=None, mo_occ=None,
     '''Generate a function to compute the product of UHF response function and
     UHF density matrices.
     '''
+    from gpu4pyscf.hessian.rks import get_nlc_response_ground_state
     from gpu4pyscf.hessian.uks import nr_uks_fnlc_mo
     assert isinstance(mf, (uhf.UHF, rohf.ROHF))
     if mo_coeff is None: mo_coeff = mf.mo_coeff
@@ -163,6 +169,7 @@ def _gen_uhf_response(mf, mo_coeff=None, mo_occ=None,
 
         if not with_nlc and mf.do_nlc():
             logger.warn(mf, "NLC contribution in gen_response is NOT included")
+        nlc_ground_state = [] # the NLC response's ground-state part, built by the first call that needs it
 
         def vind(dm1):
             if hermi == 2:
@@ -171,7 +178,9 @@ def _gen_uhf_response(mf, mo_coeff=None, mo_occ=None,
                 v1 = ni.nr_uks_fxc(mol, grids, mf.xc, dm0, dm1, 0, hermi,
                                    rho0, vxc, fxc, max_memory=max_memory)
                 if with_nlc and mf.do_nlc():
-                    v1 += nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1, return_in_mo = False)
+                    ground_state = get_nlc_response_ground_state(mf, mol, mo_coeff, mo_occ, nlc_ground_state)
+                    v1 += nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1, return_in_mo = False,
+                                         ground_state = ground_state)
             if not hybrid:
                 if with_j:
                     v1 += mf.get_j(mol, dm1[0]+dm1[1], hermi=hermi)
