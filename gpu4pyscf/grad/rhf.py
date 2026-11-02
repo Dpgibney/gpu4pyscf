@@ -33,6 +33,7 @@ from gpu4pyscf.scf.jk import (
     LMAX, QUEUE_DEPTH, SHM_SIZE, THREADS, libvhf_rys, _VHFOpt,
     _nearest_power2, _TimingCollector, _check_rsh_factors)
 from gpu4pyscf.gto.mole import groupby, extract_pgto_params, SortedMole
+from gpu4pyscf.scf import j_engine
 from gpu4pyscf.df.int3c2e_bdiv import (
     Int3c2eOpt, _int3c2e_ip1_evaluator, int3c2e_scheme, int3c2e_scheme_ip1)
 
@@ -629,6 +630,20 @@ class Gradients(GradientsBase):
         '''
         if dm is None: dm = self.base.make_rdm1()
         mf = self.base
+        jopts = getattr(mf, '_opt_jengine', None)
+        if (k_factor == 0 and not omega and lr_factor is None and sr_factor is None
+                and jopts is not None and mf.mol.omega == 0 and j_engine.ej_ip1_available()):
+            # Coulomb only (pure functionals): the J engine's gradient, with the
+            # total density (the J energy depends on its symmetric part only)
+            jopt = jopts.get(mf.mol.omega)
+            if jopt is None:
+                jopt = jopts[mf.mol.omega] = j_engine._VHFOpt(
+                    mf.mol, mf.direct_scf_tol).build()
+            if not jopt.h_shls:
+                dm = cp.asarray(dm)
+                if dm.ndim == 3:
+                    dm = dm.sum(axis=0)
+                return j_factor * jopt.get_ej_ip1(dm, verbose)
         vhfopt = mf._opt_gpu.get(omega)
         if vhfopt is None:
             # For LDA and GGA, only mf._opt_jengine is initialized

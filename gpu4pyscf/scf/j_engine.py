@@ -270,6 +270,149 @@ class _VHFOpt(jk._VHFOpt):
             vj *= 2.
         return vj
 
+    def get_ej_ip1(self, dm, verbose=None):
+        '''Nuclear derivatives of the Coulomb energy 1/2 Tr(D J[D]) for a density
+        matrix in the AO basis, an array of shape (natm, 3).
+
+        The derivative of a pair's charge distribution with respect to one of its
+        centers, d/dA_x (G_i G_j) = 2 a G_{i+1_x} G_j - i_x G_{i-1_x} G_j, is a
+        Hermite expansion one order above the pair's. MD_build_j_ip1 gives every
+        pair's Hermite potential to that order (the J engine with the densities in a
+        layout of one more order per pair, the top components zero), and
+        Rt_ip1_dot_dm contracts them with the pairs' derivative densities per atom.
+        '''
+        log = logger.new_logger(self.mol, verbose)
+        cput0 = log.init_timer()
+        mol = self.sorted_mol
+        assert not self.h_shls
+        dm = cp.asarray(dm)
+        dms = self.apply_coeff_C_mat_CT(transpose_sum(dm[None].copy()) * .5)
+        ao_loc = mol.ao_loc
+        dm_cond = cp.log(condense('absmax', dms, ao_loc) + 1e-300).astype(np.float32)
+        log_cutoff = math.log(self.direct_scf_tol)
+
+        l_counts = np.bincount(mol._bas[:,ANG_OF])[:LMAX+1]
+        n_groups = len(l_counts)
+        l_ctr_bas_loc = np.cumsum(np.append(0, l_counts))
+        pair_mappings = _make_pair_qd_cond(mol, self.bas_pair_cache, dm_cond)
+        dm_cond = None
+
+        pair_lst = []
+        task_offsets = {}
+        p1 = 0
+        for key in ((i, j) for i in range(n_groups) for j in range(i+1)):
+            pair_lst.append(pair_mappings[key][0])
+            task_offsets[key] = p1
+            p1 += pair_mappings[key][0].size
+        pair_lst = cp.asarray(cp.hstack(pair_lst), dtype=np.int32)
+        ls = cp.asarray(mol._bas[:,ANG_OF], dtype=np.int32)
+        ll = (ls[:,None] + ls).ravel()[pair_lst]
+        pair_loc = cp.cumsum(cp.append(cp.zeros(1, dtype=np.int32),
+                                       (ll+1)*(ll+2)*(ll+3)//6), dtype=np.int32)
+        # one Hermite order more per pair
+        pair_loc1 = cp.cumsum(cp.append(cp.zeros(1, dtype=np.int32),
+                                        (ll+2)*(ll+3)*(ll+4)//6), dtype=np.int32)
+        ls = ll = None
+        dm_xyz = _dm_to_Rt(mol, dms, pair_lst, pair_loc, self.rys_envs)[0]
+        dm1_size = int(pair_loc1[-1])
+        dm1 = cp.zeros(dm1_size)
+        for (i, j), p0 in task_offsets.items():
+            n = pair_mappings[i,j][0].size
+            if n == 0:
+                continue
+            a0, a1 = int(pair_loc[p0]), int(pair_loc[p0+n])
+            b0, b1 = int(pair_loc1[p0]), int(pair_loc1[p0+n])
+            dm1[b0:b1].reshape(n, -1)[:,_herm_in_next_order(i+j)] = dm_xyz[a0:a1].reshape(n, -1)
+        dm_xyz = None
+
+        tasks = [(i, j, k, l)
+                 for i in range(n_groups) for j in range(i+1)
+                 for k in range(i+1) for l in range(k+1)
+                 if not (i == k and j < l)]
+        schemes = {t: _md_j_engine_quartets_scheme((t[0]+1, t[1], t[2]+1, t[3]))
+                   for t in tasks}
+        tasks = iter(tasks)
+        _env = _scale_sp_ctr_coeff(mol)
+
+        def proc(dm1):
+            device_id = cp.cuda.device.get_device_id()
+            dm1 = asarray(dm1)
+            vj1 = cp.zeros_like(dm1)
+            _pair_mappings = pair_mappings
+            if device_id > 0:
+                _pair_mappings = {k: [cp.asarray(x) for x in v]
+                                  for k, v in pair_mappings.items()}
+            _pair_loc1 = cp.asarray(pair_loc1)
+            kern = libvhf_md.MD_build_j_ip1
+            n_sm = cp.cuda.Device().attributes['MultiProcessorCount']
+            for task in tasks:
+                i, j, k, l = task
+                pair_ij_mapping, q_cond_ij, qd_ij = _pair_mappings[i,j]
+                pair_kl_mapping, q_cond_kl, qd_kl = _pair_mappings[k,l]
+                npairs_ij = pair_ij_mapping.size
+                npairs_kl = pair_kl_mapping.size
+                if npairs_ij == 0 or npairs_kl == 0:
+                    continue
+                shls_slice = l_ctr_bas_loc[[i, i+1, j, j+1, k, k+1, l, l+1]]
+                pair_ij_loc = _pair_loc1[task_offsets[i,j]:]
+                pair_kl_loc = _pair_loc1[task_offsets[k,l]:]
+                scheme = _fill_sms_tilex(schemes[task], npairs_ij, npairs_kl,
+                                         (i, j) == (k, l), n_sm)
+                err = kern(
+                    ctypes.cast(vj1.data.ptr, ctypes.c_void_p),
+                    ctypes.cast(dm1.data.ptr, ctypes.c_void_p),
+                    ctypes.c_int(1), ctypes.c_int(dm1_size),
+                    ctypes.byref(self.rys_envs), (ctypes.c_int*6)(*scheme),
+                    (ctypes.c_int*8)(*shls_slice),
+                    ctypes.c_int(npairs_ij), ctypes.c_int(npairs_kl),
+                    ctypes.cast(pair_ij_mapping.data.ptr, ctypes.c_void_p),
+                    ctypes.cast(pair_kl_mapping.data.ptr, ctypes.c_void_p),
+                    ctypes.cast(pair_ij_loc.data.ptr, ctypes.c_void_p),
+                    ctypes.cast(pair_kl_loc.data.ptr, ctypes.c_void_p),
+                    ctypes.cast(qd_ij.data.ptr, ctypes.c_void_p),
+                    ctypes.cast(qd_kl.data.ptr, ctypes.c_void_p),
+                    ctypes.cast(q_cond_ij.data.ptr, ctypes.c_void_p),
+                    ctypes.cast(q_cond_kl.data.ptr, ctypes.c_void_p),
+                    ctypes.c_float(log_cutoff),
+                    mol._atm.ctypes, ctypes.c_int(mol.natm),
+                    mol._bas.ctypes, ctypes.c_int(mol.nbas), _env.ctypes)
+                if err != 0:
+                    raise RuntimeError(f'MD_build_j_ip1 kernel for {task} failed')
+            if num_devices > 1:
+                cp.cuda.stream.get_current_stream().synchronize()
+            return vj1
+
+        results = multi_gpu.run(proc, args=(dm1,), non_blocking=True)
+        vj1 = multi_gpu.array_reduce(results, inplace=True)
+        ej = cp.zeros((mol.natm, 3))
+        ao_loc = cp.asarray(ao_loc, dtype=np.int32)  # held until the kernel has run
+        err = libvhf_md.Rt_ip1_dot_dm(
+            ctypes.cast(ej.data.ptr, ctypes.c_void_p),
+            ctypes.cast(vj1.data.ptr, ctypes.c_void_p),
+            ctypes.cast(dms.data.ptr, ctypes.c_void_p),
+            ctypes.byref(self.rys_envs),
+            ctypes.cast(pair_lst.data.ptr, ctypes.c_void_p),
+            ctypes.cast(pair_loc1.data.ptr, ctypes.c_void_p),
+            ctypes.c_int(pair_lst.size),
+            ctypes.cast(ao_loc.data.ptr, ctypes.c_void_p))
+        if err != 0:
+            raise RuntimeError('Rt_ip1_dot_dm kernel failed')
+        # E_J = 2 sum_P D^P.V^P over the unique pairs, and the derivative of either
+        # density in it
+        ej *= 4.
+        log.timer_debug1('J engine gradient', *cput0)
+        return ej.get()
+
+def ej_ip1_available():
+    '''Whether the library has the J engine's gradient (exp/prim-screen builds)'''
+    return hasattr(libvhf_md, 'MD_build_j_ip1') and hasattr(libvhf_md, 'Rt_ip1_dot_dm')
+
+def _herm_in_next_order(l):
+    '''The positions of the Hermite components of order l among those of order l+1'''
+    nxt = [(t, u, v) for t in range(l+2) for u in range(l+2-t) for v in range(l+2-t-u)]
+    return cp.asarray([nxt.index((t, u, v)) for t in range(l+1)
+                       for u in range(l+1-t) for v in range(l+1-t-u)])
+
 def _cache_q_cond_and_non0pairs(mol, rys_envs, precision):
     assert all(mol.uniq_l_ctr[:,1] == 1)
     bas_pair_cache = jk._cache_q_cond_and_non0pairs(mol, rys_envs, precision,
