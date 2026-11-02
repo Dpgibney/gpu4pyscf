@@ -26,7 +26,7 @@ from gpu4pyscf.gto.mole import basis_seg_contraction
 from gpu4pyscf.lib.cupy_helper import (
     contract, get_avail_mem, load_library, add_sparse, release_gpu_stack, transpose_sum,
     grouped_dot, grouped_gemm, reduce_to_device, take_last2d, ndarray,
-    batched_vec_norm2, batched_vec_dot, MEMPOOL_THRESHOLD)
+    batched_vec_norm2, batched_vec_dot, MEMPOOL_THRESHOLD, dot_abt)
 from gpu4pyscf.dft import xc_deriv, libxc
 from gpu4pyscf.lib import logger
 from gpu4pyscf.lib.multi_gpu import lru_cache
@@ -558,16 +558,16 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
             vtmp = cupy.ndarray((nao_sub, nao_sub), memptr=vtmp_buf.data)
             if xctype == 'LDA':
                 aow = _scale_ao(ao_mask, wv[0,p0:p1], out=buf)
-                add_sparse(vmat, ao_mask.dot(aow.T, out=vtmp), idx)
+                add_sparse(vmat, dot_abt(ao_mask, aow, out=vtmp), idx)
             elif xctype == 'GGA':
                 aow = _scale_ao(ao_mask, wv[:,p0:p1], out=buf)
-                add_sparse(vmat, ao_mask[0].dot(aow.T, out=vtmp), idx)
+                add_sparse(vmat, dot_abt(ao_mask[0], aow, out=vtmp), idx)
             elif xctype == 'NLC':
                 raise NotImplementedError('NLC')
             elif xctype == 'MGGA':
                 vtmp = _tau_dot(ao_mask, ao_mask, wv[4,p0:p1], buf=buf, out=vtmp)
                 aow = _scale_ao(ao_mask, wv[:4,p0:p1], out=buf)
-                vtmp = contract('ig,jg->ij', ao_mask[0], aow, beta=1., out=vtmp)
+                vtmp = dot_abt(ao_mask[0], aow, beta=1., out=vtmp)
                 add_sparse(vmat, vtmp, idx)
             elif xctype == 'HF':
                 pass
@@ -985,24 +985,24 @@ def _nr_uks_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
             for i in range(nset):
                 if xctype == 'LDA':
                     aow_alpha = _scale_ao(ao_mask, wv[i,0,0,p0:p1], out=buf)
-                    add_sparse(vmata[i], ao_mask.dot(aow_alpha.T, out=vtmp), idx)
+                    add_sparse(vmata[i], dot_abt(ao_mask, aow_alpha, out=vtmp), idx)
                     aow_beta = _scale_ao(ao_mask, wv[i,1,0,p0:p1], out=buf)
-                    add_sparse(vmatb[i], ao_mask.dot(aow_beta.T, out=vtmp), idx)
+                    add_sparse(vmatb[i], dot_abt(ao_mask, aow_beta, out=vtmp), idx)
                 elif xctype == 'GGA':
                     aow_alpha = _scale_ao(ao_mask, wv[i,0,:,p0:p1], out=buf)
-                    add_sparse(vmata[i], ao_mask[0].dot(aow_alpha.T, out=vtmp), idx)
+                    add_sparse(vmata[i], dot_abt(ao_mask[0], aow_alpha, out=vtmp), idx)
                     aow_beta = _scale_ao(ao_mask, wv[i,1,:,p0:p1], out=buf)
-                    add_sparse(vmatb[i], ao_mask[0].dot(aow_beta.T, out=vtmp), idx)
+                    add_sparse(vmatb[i], dot_abt(ao_mask[0], aow_beta, out=vtmp), idx)
                 elif xctype == 'NLC':
                     raise NotImplementedError('NLC')
                 elif xctype == 'MGGA':
                     va = _tau_dot(ao_mask, ao_mask, wv[i,0,4, p0:p1], out=vtmp)
                     aow_alpha = _scale_ao(ao_mask[:4], wv[i,0,:4,p0:p1], out=buf)
-                    va = contract('ig,jg->ij', ao_mask[0],aow_alpha, beta=1, out=va)
+                    va = dot_abt(ao_mask[0], aow_alpha, beta=1., out=va)
                     add_sparse(vmata[i], va, idx)
                     vb = _tau_dot(ao_mask, ao_mask, wv[i,1,4, p0:p1], out=vtmp)
                     aow_beta = _scale_ao(ao_mask[:4], wv[i,1,:4,p0:p1], out=buf)
-                    vb = contract('ig,jg->ij', ao_mask[0],aow_beta, beta=1, out=vb)
+                    vb = dot_abt(ao_mask[0], aow_beta, beta=1., out=vb)
                     add_sparse(vmatb[i], vb, idx)
                 elif xctype == 'HF':
                     pass
@@ -1358,11 +1358,11 @@ def _nr_rks_fxc_task(ni, mol, grids, xc_code, fxc, dms, mo1, occ_coeff,
                 wv = wvs[i]
                 if xctype == 'LDA':
                     aow = _scale_ao(ao, wv[0], out=buf)
-                    add_sparse(vmat[i], ao.dot(aow.T, out=vtmp), mask)
+                    add_sparse(vmat[i], dot_abt(ao, aow, out=vtmp), mask)
                 elif xctype == 'GGA':
                     wv[0] *= .5
                     aow = _scale_ao(ao, wv, out=buf)
-                    add_sparse(vmat[i], ao[0].dot(aow.T, out=vtmp), mask)
+                    add_sparse(vmat[i], dot_abt(ao[0], aow, out=vtmp), mask)
                 elif xctype == 'NLC':
                     raise NotImplementedError('NLC')
                 else:
@@ -1370,7 +1370,7 @@ def _nr_rks_fxc_task(ni, mol, grids, xc_code, fxc, dms, mo1, occ_coeff,
                     wv[4] *= .5
                     vtmp = _tau_dot(ao, ao, wv[4], buf=buf, out=vtmp)
                     aow = _scale_ao(ao[:4], wv[:4], out=buf)
-                    vtmp = contract('ig, jg->ij', ao[0], aow, beta=1, out=vtmp)
+                    vtmp = dot_abt(ao[0], aow, beta=1., out=vtmp)
                     add_sparse(vmat[i], vtmp, mask)
             t1 = log.timer_debug2('integration', *t1)
         t0 = log.timer_debug1('vxc', *t0)
@@ -1543,16 +1543,16 @@ def _nr_uks_fxc_task(ni, mol, grids, xc_code, fxc, dms, mo1, occ_coeff,
                 wv_a, wv_b = _contract_rho1_fxc(rho1[:,i], fxc_w)
                 if xctype == 'LDA':
                     aow_a = _scale_ao(ao, wv_a[0], out=buf)
-                    add_sparse(vmata[i], ao.dot(aow_a.T, out=vtmp), mask)
+                    add_sparse(vmata[i], dot_abt(ao, aow_a, out=vtmp), mask)
                     aow_b = _scale_ao(ao, wv_b[0], out=buf)
-                    add_sparse(vmatb[i], ao.dot(aow_b.T, out=vtmp), mask)
+                    add_sparse(vmatb[i], dot_abt(ao, aow_b, out=vtmp), mask)
                 elif xctype == 'GGA':
                     wv_a[0] *= .5 # for transpose_sum at the end
                     wv_b[0] *= .5
                     aow_a = _scale_ao(ao, wv_a, out=buf)
-                    add_sparse(vmata[i], ao[0].dot(aow_a.T, out=vtmp), mask)
+                    add_sparse(vmata[i], dot_abt(ao[0], aow_a, out=vtmp), mask)
                     aow_b = _scale_ao(ao, wv_b, out=buf)
-                    add_sparse(vmatb[i], ao[0].dot(aow_b.T, out=vtmp), mask)
+                    add_sparse(vmatb[i], dot_abt(ao[0], aow_b, out=vtmp), mask)
                 elif xctype == 'NLC':
                     raise NotImplementedError('NLC')
                 else:
@@ -1560,11 +1560,11 @@ def _nr_uks_fxc_task(ni, mol, grids, xc_code, fxc, dms, mo1, occ_coeff,
                     wv_b[[0,4]] *= .5
                     vtmp_a = _tau_dot(ao, ao, wv_a[4], buf=buf, out=vtmp)
                     aow_a = _scale_ao(ao[:4], wv_a[:4], out=buf)
-                    vtmp_a = contract('ig, jg->ij', ao[0], aow_a, beta=1, out=vtmp)
+                    vtmp_a = dot_abt(ao[0], aow_a, beta=1., out=vtmp)
                     add_sparse(vmata[i], vtmp_a, mask)
                     vtmp_b = _tau_dot(ao, ao, wv_b[4], buf=buf, out=vtmp)
                     aow_b = _scale_ao(ao[:4], wv_b[:4], out=buf)
-                    vtmp_b = contract('ig, jg->ij', ao[0], aow_b, beta=1, out=vtmp)
+                    vtmp_b = dot_abt(ao[0], aow_b, beta=1., out=vtmp)
                     add_sparse(vmatb[i], vtmp_b, mask)
 
             t1 = log.timer_debug2('integration', *t1)
@@ -1747,7 +1747,7 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
         wv = vv_vxc[:,p0:p1] * weight
         wv[0] *= .5
         aow = _scale_ao(ao, wv)
-        add_sparse(vmat, ao[0].dot(aow.T), mask)
+        add_sparse(vmat, dot_abt(ao[0], aow), mask)
     t1 = log.timer_debug1('integration', *t1)
 
     transpose_sum(vmat)
@@ -2532,9 +2532,9 @@ def _tau_dot(bra, ket, wv, buf=None, out=None):
     '''1/2 <nabla i| v | nabla j>'''
     # einsum('g,xig,xjg->ij', .5*wv, bra[1:4], ket[1:4])
     wv = cupy.asarray(.5 * wv)
-    out = contract('ig,jg->ij', bra[1], _scale_ao(ket[1], wv, out=buf), out=out)
-    out = contract('ig,jg->ij', bra[2], _scale_ao(ket[2], wv, out=buf), beta=1., out=out)
-    out = contract('ig,jg->ij', bra[3], _scale_ao(ket[3], wv, out=buf), beta=1., out=out)
+    out = dot_abt(bra[1], _scale_ao(ket[1], wv, out=buf), out=out)
+    out = dot_abt(bra[2], _scale_ao(ket[2], wv, out=buf), beta=1., out=out)
+    out = dot_abt(bra[3], _scale_ao(ket[3], wv, out=buf), beta=1., out=out)
     return out
 
 class _GDFTOpt:
