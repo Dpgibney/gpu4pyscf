@@ -831,49 +831,71 @@ def get_nlc_exc_full_response(ni, mol, grids, xc_code, dms, relativity=0, hermi=
 
     grid_to_atom_index_map = grids.atm_idx[rho_nonzero_mask]
     assert cupy.all(grid_to_atom_index_map >= 0) # There shouldn't be padded grids not from any atom with sort_grids_of_each_atom = True
-    grid_offsets_of_atom = cupy.bincount(grid_to_atom_index_map, minlength = natm)
-    grid_offsets_of_atom = cupy.concatenate((cupy.array([0]), grid_offsets_of_atom))
-    grid_offsets_of_atom = cupy.cumsum(grid_offsets_of_atom)
-    grid_offsets_of_atom = cupy.asarray(grid_offsets_of_atom, dtype = cupy.int32)
-
-    assert grid_offsets_of_atom.shape == (natm + 1,)
-    for i_atom in range(natm):
-        assert cupy.all(grid_to_atom_index_map[grid_offsets_of_atom[i_atom] : grid_offsets_of_atom[i_atom + 1]] == i_atom)
-    assert cupy.all(grid_to_atom_index_map[grid_offsets_of_atom[natm] : ] < 0)
-
-    de_grid_response_phi = cupy.zeros((natm, 3))
-
-    for g0 in range(0, ngrids, ngrids_per_batch):
-        g1 = min(g0 + ngrids_per_batch, ngrids)
-
-        E_Bgr_i = cupy.empty([natm, 3, g1-g0], order = "C")
-        err = libgdft.VXC_vv10nlc_grad_eval_E_grid_response_offdiagonal(
+    if hasattr(libgdft, 'VXC_vv10nlc_grad_grid_response_T'):
+        # The kernel below gives E_Bgr[B][i]; with its diagonal set to minus the rest, de[B] = sum_i rho_w_i E_Bgr[B][i]
+        # is 3 sum_{j on B} T_j, T_j = sum over the points i on other atoms of K_ij (r_i - r_j), where K_ij =
+        # rho_w_i rho_w_j Phi_ij f_ij is symmetric: each pair of points once, and no per-(atom, point) array
+        atom_of_grid = cupy.asarray(grid_to_atom_index_map, dtype=cupy.int32)
+        T = cupy.empty((3, ngrids))
+        err = libgdft.VXC_vv10nlc_grad_grid_response_T(
             ctypes.cast(stream.ptr, ctypes.c_void_p),
-            ctypes.cast(E_Bgr_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(T.data.ptr, ctypes.c_void_p),
             ctypes.cast(grids_coords.data.ptr, ctypes.c_void_p),
             ctypes.cast(rho_weight_i.data.ptr, ctypes.c_void_p),
             ctypes.cast(omega_i.data.ptr, ctypes.c_void_p),
             ctypes.cast(kappa_i.data.ptr, ctypes.c_void_p),
-            ctypes.cast(grid_to_atom_index_map.data.ptr, ctypes.c_void_p),
-            ctypes.cast(grid_offsets_of_atom.data.ptr, ctypes.c_void_p),
-            ctypes.c_int(natm),
-            ctypes.c_int(g0),
-            ctypes.c_int(g1-g0),
+            ctypes.cast(atom_of_grid.data.ptr, ctypes.c_void_p),
+            ctypes.c_int(ngrids),
         )
         if err != 0:
             raise RuntimeError('CUDA Error in vv10 gradient (grid response) kernel')
+        de_grid_response_phi = 3 * cupy.stack(
+            [cupy.bincount(atom_of_grid, weights=T[x], minlength=natm) for x in range(3)], axis=1)
+        del T, atom_of_grid
+    else:
+        grid_offsets_of_atom = cupy.bincount(grid_to_atom_index_map, minlength = natm)
+        grid_offsets_of_atom = cupy.concatenate((cupy.array([0]), grid_offsets_of_atom))
+        grid_offsets_of_atom = cupy.cumsum(grid_offsets_of_atom)
+        grid_offsets_of_atom = cupy.asarray(grid_offsets_of_atom, dtype = cupy.int32)
 
+        assert grid_offsets_of_atom.shape == (natm + 1,)
         for i_atom in range(natm):
-            range_0, range_1 = grid_offsets_of_atom[i_atom] - g0, grid_offsets_of_atom[i_atom + 1] - g0
-            range_0 = max(range_0, 0)
-            range_1 = min(range_1, g1)
-            if range_0 >= g1 or range_1 < 0:
-                continue
+            assert cupy.all(grid_to_atom_index_map[grid_offsets_of_atom[i_atom] : grid_offsets_of_atom[i_atom + 1]] == i_atom)
+        assert cupy.all(grid_to_atom_index_map[grid_offsets_of_atom[natm] : ] < 0)
 
-            E_Bgr_i[i_atom, :, range_0:range_1] = \
-                -cupy.sum(E_Bgr_i[:, :, range_0:range_1], axis = 0)
+        de_grid_response_phi = cupy.zeros((natm, 3))
 
-        de_grid_response_phi += cupy.einsum("Adg->Ad", E_Bgr_i * rho_weight_i[g0:g1])
+        for g0 in range(0, ngrids, ngrids_per_batch):
+            g1 = min(g0 + ngrids_per_batch, ngrids)
+
+            E_Bgr_i = cupy.empty([natm, 3, g1-g0], order = "C")
+            err = libgdft.VXC_vv10nlc_grad_eval_E_grid_response_offdiagonal(
+                ctypes.cast(stream.ptr, ctypes.c_void_p),
+                ctypes.cast(E_Bgr_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(grids_coords.data.ptr, ctypes.c_void_p),
+                ctypes.cast(rho_weight_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(omega_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(kappa_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(grid_to_atom_index_map.data.ptr, ctypes.c_void_p),
+                ctypes.cast(grid_offsets_of_atom.data.ptr, ctypes.c_void_p),
+                ctypes.c_int(natm),
+                ctypes.c_int(g0),
+                ctypes.c_int(g1-g0),
+            )
+            if err != 0:
+                raise RuntimeError('CUDA Error in vv10 gradient (grid response) kernel')
+
+            for i_atom in range(natm):
+                range_0, range_1 = grid_offsets_of_atom[i_atom] - g0, grid_offsets_of_atom[i_atom + 1] - g0
+                range_0 = max(range_0, 0)
+                range_1 = min(range_1, g1)
+                if range_0 >= g1 or range_1 < 0:
+                    continue
+
+                E_Bgr_i[i_atom, :, range_0:range_1] = \
+                    -cupy.sum(E_Bgr_i[:, :, range_0:range_1], axis = 0)
+
+            de_grid_response_phi += cupy.einsum("Adg->Ad", E_Bgr_i * rho_weight_i[g0:g1])
 
     del omega_i, kappa_i
     del rho_weight_i
