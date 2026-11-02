@@ -27,74 +27,136 @@
 
 #define NG_PER_BLOCK      128
 
-__global__
-static void vv10_fock_eval_UWE_kernel(double* __restrict__ U, double* __restrict__ W, double* __restrict__ E,
-                                      const double* __restrict__ grid_coord, const double* __restrict__ rho_weight,
-                                      const double* __restrict__ omega, const double* __restrict__ kappa,
-                                      const int ngrids)
-{
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const bool active = i < ngrids;
+#define VV10_JTILES     4
+// VV10_TILE (128) points per tile; VV10_JTILES J tiles per block (part 26)
+#define VV10_TILE       128
+#define VV10_WARPS      (VV10_TILE / 32)
 
-    double omega_i = NAN;
-    double kappa_i = NAN;
-    double3 r_i = { NAN, NAN, NAN };
-    if (active) {
+// The symmetric version without per-j reductions: in a warp each lane keeps its i and meets the 32 j's of a chunk in
+// turn, j = (lane + s) % 32 at step s, reading their data from shared memory; the j side's three sums travel with their
+// j from lane to lane (a shuffle per step), so after 32 steps each is back on its lane, complete for the warp's i's.
+__global__
+static void vv10_fock_eval_UWE_rot_kernel(double* __restrict__ U, double* __restrict__ W, double* __restrict__ E,
+                                          const double* __restrict__ grid_coord, const double* __restrict__ rho_weight,
+                                          const double* __restrict__ omega, const double* __restrict__ kappa,
+                                          const int ngrids, const int jtiles)
+{
+    const int ntiles = (ngrids + VV10_TILE - 1) / VV10_TILE;
+    const int I = blockIdx.x;
+    const int J0 = I + blockIdx.y * jtiles;
+    if (J0 >= ntiles) {
+        return;
+    }
+    const int J1 = min(J0 + jtiles, ntiles);
+    const int t = threadIdx.x;
+    const int lane = t % 32;
+    const int warp = t / 32;
+    const int i = I * VV10_TILE + t;
+    double omega_i = 1., kappa_i = 1., rho_weight_i = 0.;
+    double3 r_i = {0., 0., 0.};
+    if (i < ngrids) {
         omega_i = omega[i];
         kappa_i = kappa[i];
+        rho_weight_i = rho_weight[i];
         r_i.x = grid_coord[i * 3 + 0];
         r_i.y = grid_coord[i * 3 + 1];
         r_i.z = grid_coord[i * 3 + 2];
     }
+    double U_i = 0, W_i = 0, E_i = 0;
 
-    double U_i = 0;
-    double W_i = 0;
-    double E_i = 0;
+    __shared__ double s_x[VV10_TILE], s_y[VV10_TILE], s_z[VV10_TILE];
+    __shared__ double s_o[VV10_TILE], s_k[VV10_TILE], s_w[VV10_TILE];
+    __shared__ double s_acc[VV10_WARPS][3][VV10_TILE];
+    const int next = (lane + 1) % 32;
 
-    __shared__ double3 shared_omega_kappa_rhow_j[NG_PER_BLOCK];
-    __shared__ double3 shared_r_j[NG_PER_BLOCK];
-
-    for (int j_block_offset = 0; j_block_offset < ngrids; j_block_offset += NG_PER_BLOCK) {
-        const int j = j_block_offset + threadIdx.x;
-        if (j < ngrids) {
-            shared_omega_kappa_rhow_j[threadIdx.x].x = omega[j];
-            shared_omega_kappa_rhow_j[threadIdx.x].y = kappa[j];
-            shared_omega_kappa_rhow_j[threadIdx.x].z = rho_weight[j];
-            shared_r_j[threadIdx.x].x = grid_coord[j * 3 + 0];
-            shared_r_j[threadIdx.x].y = grid_coord[j * 3 + 1];
-            shared_r_j[threadIdx.x].z = grid_coord[j * 3 + 2];
+    for (int J = J0; J < J1; J++) {
+        const int jt = J * VV10_TILE + t;
+        if (jt < ngrids) {
+            s_x[t] = grid_coord[jt * 3 + 0];
+            s_y[t] = grid_coord[jt * 3 + 1];
+            s_z[t] = grid_coord[jt * 3 + 2];
+            s_o[t] = omega[jt];
+            s_k[t] = kappa[jt];
+            s_w[t] = rho_weight[jt];
+        } else {
+            s_x[t] = 0.; s_y[t] = 0.; s_z[t] = 0.;
+            s_o[t] = 1.; s_k[t] = 1.; s_w[t] = 0.;
         }
         __syncthreads();
-
-        const int block_upper_bound = min(NG_PER_BLOCK, ngrids - j_block_offset);
-        for (int j_in_block = 0; j_in_block < block_upper_bound; j_in_block++) {
-            const double omega_j = shared_omega_kappa_rhow_j[j_in_block].x;
-            const double kappa_j = shared_omega_kappa_rhow_j[j_in_block].y;
-            const double3 r_j = shared_r_j[j_in_block];
-            const double rho_weight_j = shared_omega_kappa_rhow_j[j_in_block].z;
-
-            const double r_ij2 = (r_i.x - r_j.x) * (r_i.x - r_j.x) + (r_i.y - r_j.y) * (r_i.y - r_j.y) + (r_i.z - r_j.z) * (r_i.z - r_j.z);
-            const double g_ij = omega_i * r_ij2 + kappa_i;
-            const double g_ji = omega_j * r_ij2 + kappa_j;
-            const double g_sum = g_ij + g_ji;
-            const double g_ij_ji_sum_1 = 1 / (g_ij * g_ji * g_sum);
-            const double Phi_ij = -g_ij_ji_sum_1; // Prefactor of 1.5 is applied later
-
-            const double E_ij = rho_weight_j * Phi_ij;
-            const double U_ij = E_ij * (g_sum + g_ij) * g_ji * g_ij_ji_sum_1;
-            const double W_ij = U_ij * r_ij2;
-
-            U_i += U_ij;
-            W_i += W_ij;
-            E_i += E_ij;
+        const bool diag = J == I;
+        for (int c = 0; c < VV10_WARPS; c++) {
+            double U_j = 0, W_j = 0, E_j = 0;
+            // in a diagonal tile the chunks below this warp's are the other warps' (j > i there)
+            if (!diag || c >= warp) {
+                for (int s = 0; s < 32; s++) {
+                    const int jj = c * 32 + (lane + s) % 32;
+                    const double dx = r_i.x - s_x[jj];
+                    const double dy = r_i.y - s_y[jj];
+                    const double dz = r_i.z - s_z[jj];
+                    const double omega_j = s_o[jj];
+                    const double kappa_j = s_k[jj];
+                    const double rho_weight_j = s_w[jj];
+                    const double r_ij2 = dx * dx + dy * dy + dz * dz;
+                    const double g_ij = omega_i * r_ij2 + kappa_i;
+                    const double g_ji = omega_j * r_ij2 + kappa_j;
+                    const double g_sum = g_ij + g_ji;
+                    const double g_ij_ji_sum_1 = 1 / (g_ij * g_ji * g_sum);
+                    const double Phi_ij = -g_ij_ji_sum_1;
+                    // the i side: j >= i in a diagonal tile (j == i once); the j side: j > i there
+                    if (!diag || jj >= t) {
+                        const double E_ij = rho_weight_j * Phi_ij;
+                        const double U_ij = E_ij * (g_sum + g_ij) * g_ji * g_ij_ji_sum_1;
+                        U_i += U_ij;
+                        W_i += U_ij * r_ij2;
+                        E_i += E_ij;
+                    }
+                    if (!diag || jj > t) {
+                        const double E_ji = rho_weight_i * Phi_ij;
+                        const double U_ji = E_ji * (g_sum + g_ji) * g_ij * g_ij_ji_sum_1;
+                        U_j += U_ji;
+                        W_j += U_ji * r_ij2;
+                        E_j += E_ji;
+                    }
+                    // the sums of the j this lane meets next, from the lane that has it now
+                    U_j = __shfl_sync(0xffffffff, U_j, next);
+                    W_j = __shfl_sync(0xffffffff, W_j, next);
+                    E_j = __shfl_sync(0xffffffff, E_j, next);
+                }
+            }
+            // after 32 steps the sums of j = c*32 + lane are back on this lane
+            s_acc[warp][0][c * 32 + lane] = U_j;
+            s_acc[warp][1][c * 32 + lane] = W_j;
+            s_acc[warp][2][c * 32 + lane] = E_j;
+        }
+        __syncthreads();
+        if (jt < ngrids) {
+            double u = 0, w = 0, e = 0;
+            for (int k = 0; k < VV10_WARPS; k++) {
+                u += s_acc[k][0][t];
+                w += s_acc[k][1][t];
+                e += s_acc[k][2][t];
+            }
+            atomicAdd(U + jt, u);
+            atomicAdd(W + jt, w);
+            atomicAdd(E + jt, e);
         }
         __syncthreads();
     }
+    if (i < ngrids) {
+        atomicAdd(U + i, U_i);
+        atomicAdd(W + i, W_i);
+        atomicAdd(E + i, E_i);
+    }
+}
 
-    if (active) {
-        U[i] = -U_i * 1.5;
-        W[i] = -W_i * 1.5;
-        E[i] = E_i * 1.5;
+__global__
+static void vv10_scale_UWE_kernel(double* __restrict__ U, double* __restrict__ W, double* __restrict__ E, const int ngrids)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < ngrids) {
+        U[i] *= -1.5;
+        W[i] *= -1.5;
+        E[i] *= 1.5;
     }
 }
 
@@ -654,10 +716,18 @@ int VXC_vv10nlc_fock_eval_UWE(const cudaStream_t stream,
                               const double* omega, const double* kappa,
                               const int ngrids)
 {
-    const dim3 threads(NG_PER_BLOCK);
-    const dim3 blocks((ngrids+NG_PER_BLOCK-1)/NG_PER_BLOCK);
-    vv10_fock_eval_UWE_kernel<<<blocks, threads, 0, stream>>>(U, W, E,
-                                                              grid_coord, rho_weight, omega, kappa, ngrids);
+    // each pair of points once (part 26): the kernel sums into U, W and E, vv10_scale_UWE_kernel applies the factors
+    if (ngrids <= 0) {
+        return 0;
+    }
+    cudaMemsetAsync(U, 0, ngrids * sizeof(double), stream);
+    cudaMemsetAsync(W, 0, ngrids * sizeof(double), stream);
+    cudaMemsetAsync(E, 0, ngrids * sizeof(double), stream);
+    const int ntiles = (ngrids + VV10_TILE - 1) / VV10_TILE;
+    const dim3 blocks(ntiles, (ntiles + VV10_JTILES - 1) / VV10_JTILES);
+    vv10_fock_eval_UWE_rot_kernel<<<blocks, VV10_TILE, 0, stream>>>(U, W, E, grid_coord, rho_weight, omega, kappa,
+                                                                    ngrids, VV10_JTILES);
+    vv10_scale_UWE_kernel<<<(ngrids + 255) / 256, 256, 0, stream>>>(U, W, E, ngrids);
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA Error of vv10 fock eval_UWE: %s\n", cudaGetErrorString(err));
