@@ -29,7 +29,7 @@ from gpu4pyscf.dft import radi
 from gpu4pyscf.dft import gen_grid
 from gpu4pyscf.lib.cupy_helper import (
     contract, get_avail_mem, add_sparse, tag_array, sandwich_dot,
-    reduce_to_device, take_last2d, ndarray, batched_vec_norm2)
+    reduce_to_device, take_last2d, ndarray, batched_vec_norm2, dot_rows)
 from gpu4pyscf.lib import logger
 from gpu4pyscf.__config__ import num_devices
 from gpu4pyscf.dft.numint import NLC_REMOVE_ZERO_RHO_GRID_THRESHOLD
@@ -139,20 +139,25 @@ def _get_denlc(ks_grad, mol, dm):
 def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
                   verbose=None, with_lapl=False, device_id=0):
     ''' Calculate the gradient of vxc on given device
+
+    The density matrix enters through the orbitals, dm = cpos cpos^T with
+    cpos = mo_coeff[:,occ] sqrt(mo_occ), as it does in the density (dms only
+    carries them).
     '''
     with cupy.cuda.Device(device_id):
-        if dms is not None: dms = cupy.asarray(dms)
-        if mo_coeff is not None: mo_coeff = cupy.asarray(mo_coeff)
-        if mo_occ is not None: mo_occ = cupy.asarray(mo_occ)
-        dm, dms = dms[0], None
+        mo_coeff = cupy.asarray(mo_coeff)
+        mo_occ = cupy.asarray(mo_occ)
 
         log = logger.new_logger(mol, verbose)
         t0 = log.init_timer()
         xctype = ni._xc_type(xc_code)
+        if xctype == 'NLC':
+            raise NotImplementedError('NLC')
         nao = mol.nao
         opt = ni.gdftopt
         _sorted_mol = opt._sorted_mol
-        nocc = cupy.count_nonzero(mo_occ>0)
+        cpos = mo_coeff[:,mo_occ>0] * mo_occ[mo_occ>0]**.5
+        nocc = cpos.shape[1]
 
         ngrids_glob = grids.coords.shape[0]
         grid_start, grid_end = numint.gen_grid_range(ngrids_glob, device_id)
@@ -160,61 +165,102 @@ def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
         log.debug(f"{ngrids_local} grids on Device {device_id}")
 
         exc1_ao = cupy.zeros((nao,3))
-        vtmp_buf = cupy.empty((3*nao*nao))
-        mo_buf = cupy.empty_like(mo_coeff)
-        dm_mask_buf = cupy.empty(nao*nao)
-        if xctype == 'LDA':
-            ao_deriv = 1
-            aow_buf = cupy.empty(MIN_BLK_SIZE * max(nao, 1*nocc))
-            for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
-                                                         grid_range=(grid_start, grid_end)):
-                mo_coeff_mask = cupy.take(mo_coeff, idx, axis=0, out=mo_buf[:len(idx)])
-                rho = numint.eval_rho2(_sorted_mol, ao_mask[0], mo_coeff_mask,
-                                       mo_occ, None, xctype, buf=aow_buf)
-                vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=0)[1][0]
-                wv = cupy.multiply(weight, vxc, out=vxc)
-                aow = numint._scale_ao(ao_mask[0], wv, out=aow_buf)
-                vtmp = _d1_dot_(ao_mask[1:4], aow.T, out=vtmp_buf)
-                dm_mask = take_last2d(dm, idx, out=dm_mask_buf)
-                exc1_ao[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
-        elif xctype == 'GGA':
-
-            ao_deriv = 2
-            aow_buf = cupy.empty(MIN_BLK_SIZE * max(nao * 3, 2*nocc, 4))
-            for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
-                                                         grid_range=(grid_start, grid_end)):
-                mo_coeff_mask = cupy.take(mo_coeff, idx, axis=0, out=mo_buf[:len(idx)])
-                rho = numint.eval_rho2(_sorted_mol, ao_mask[:4], mo_coeff_mask,
-                                       mo_occ, None, xctype, buf=aow_buf)
-                vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=0, work=aow_buf)[1]
-                wv = cupy.multiply(weight, vxc, out=vxc)
+        if xctype == 'HF':
+            return exc1_ao
+        ao_deriv = 1 if xctype == 'LDA' else 2
+        blksize = numint.MIN_BLK_SIZE
+        cpos_buf = cupy.empty_like(cpos)
+        fac_buf = cupy.empty(_exc1_rho_bufsize(xctype, nao, nocc) * blksize)
+        dot_buf = cupy.empty(_exc1_ao_dots_bufsize(xctype, nao, nocc) * blksize)
+        for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
+                                                     grid_range=(grid_start, grid_end)):
+            c = cupy.take(cpos, idx, axis=0, out=cpos_buf[:len(idx)])
+            rho, fac = _exc1_rho(ao_mask, c, xctype, fac_buf)
+            vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=0, work=dot_buf)[1]
+            wv = cupy.multiply(weight, vxc, out=vxc)
+            if xctype == 'LDA':
+                wv = wv[0]
+            else:
                 wv[0] *= .5
-                vtmp = _gga_grad_sum_(ao_mask, wv, buf=aow_buf, out=vtmp_buf)
-                dm_mask = take_last2d(dm, idx, out=dm_mask_buf)
-                exc1_ao[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
-
-        elif xctype == 'NLC':
-            raise NotImplementedError('NLC')
-
-        elif xctype == 'MGGA':
-            ao_deriv = 2
-            aow_buf = cupy.empty(MIN_BLK_SIZE * max(nao * 3, 2*nocc, 5))
-            for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
-                                                         grid_range=(grid_start, grid_end)):
-                mo_coeff_mask = cupy.take(mo_coeff, idx, axis=0, out=mo_buf[:len(idx)])
-                rho = numint.eval_rho2(_sorted_mol, ao_mask[:4], mo_coeff_mask,
-                                       mo_occ, None, xctype, with_lapl=False, buf=aow_buf)
-                vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=0, work=aow_buf)[1]
-                wv = cupy.multiply(weight, vxc, out=vxc)
-                wv[0] *= .5
+            if xctype == 'MGGA':
                 wv[4] *= .5  # for the factor 1/2 in tau
-                vtmp = _gga_grad_sum_(ao_mask, wv, buf=aow_buf, out=vtmp_buf)
-                vtmp = _tau_grad_dot_(ao_mask, wv[4], accumulate=True, buf=aow_buf, out=vtmp)
-                dm_mask = take_last2d(dm, idx, out=dm_mask_buf)
-                exc1_ao[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
+            exc1_ao[idx] += _exc1_ao_dots(ao_mask, c, wv, xctype, fac, dot_buf).T
 
         log.timer_debug1('gradient of vxc', *t0)
     return exc1_ao
+
+def _exc1_rho_bufsize(xctype, nao, nocc):
+    '''Size of _exc1_rho's buf, per grid point'''
+    return {'LDA': nocc, 'GGA': nocc + nao, 'MGGA': 4 * nocc}[xctype]
+
+def _exc1_ao_dots_bufsize(xctype, nao, nocc):
+    '''Size of _exc1_ao_dots's buf, per grid point'''
+    return (nao + nocc) if xctype == 'LDA' else (4 * nao + nocc)
+
+def _exc1_rho(ao, c, xctype, buf, rho=None):
+    '''The density on a grid block for the XC gradient, from c = cpos on the
+    block's AOs, and the products _exc1_ao_dots reuses: None (LDA), dm ao[0]
+    (GGA) or c^T ao[:4] (meta-GGA), in buf.
+    '''
+    nao, nocc = c.shape
+    ngrids = ao.shape[-1]
+    if xctype == 'LDA':
+        return numint._eval_rho2(ao[0], c, xctype, buf=buf, rho=rho), None
+    if xctype == 'GGA':
+        rho = ndarray((4, ngrids), buffer=rho)
+        c0 = ndarray((nocc, ngrids), buffer=buf)
+        dm_ao = ndarray((nao, ngrids), buffer=buf[nocc*ngrids:])
+        numint._eval_rho2_gga(ao, c, rho, c0, dm_ao)
+        return rho, dm_ao
+    rho = ndarray((5, ngrids), buffer=rho)
+    ao_c = ndarray((4, nocc, ngrids), buffer=buf)
+    numint._eval_rho2_mgga(ao, c, rho, ao_c[0], ao_c[1:])
+    return rho, ao_c
+
+# (Hessian component, direction j) of the tau terms sum_j d_x d_j ao (dm wv d_j ao),
+# in dot_rows(ao[4:10], ...) flattened: components XX, XY, XZ, YY, YZ, ZZ times j = x, y, z
+_TAU_TERMS = numpy.array([[0*3+0, 1*3+1, 2*3+2],   # x: XX.x + XY.y + XZ.z
+                          [1*3+0, 3*3+1, 4*3+2],   # y: XY.x + YY.y + YZ.z
+                          [2*3+0, 4*3+1, 5*3+2]])  # z: XZ.x + YZ.y + ZZ.z
+
+def _exc1_ao_dots(ao, c, wv, xctype, fac, buf, out=None):
+    '''sum_nu dm[mu,nu] v[x,mu,nu] on a grid block for the AO matrices v of the
+    XC gradient (_d1_dot_ of aow for LDA, _gga_grad_sum_, plus _tau_grad_dot_ for
+    meta-GGA), with dm = c c^T and wv weighted and scaled as those take it.
+    v is not formed: its terms are dot products over the grid, per AO, of the AO
+    derivatives with dm aow = c (c^T aow) and with the density's products fac
+    (_exc1_rho). Returns out[x,mu]; fac is overwritten for meta-GGA.
+    '''
+    nao, nocc = c.shape
+    ngrids = ao.shape[-1]
+    aow = ndarray((nao, ngrids), buffer=buf)
+    c_aow = ndarray((nocc, ngrids), buffer=buf[nao*ngrids:])
+    buf3 = buf[(nao+nocc)*ngrids:]
+    if xctype == 'LDA':
+        numint._scale_ao(ao[0], wv, out=aow)
+    else:
+        numint._scale_ao(ao[:4], wv[:4], out=aow)
+    cupy.dot(c.T, aow, out=c_aow)
+    dm_aow = cupy.dot(c, c_aow, out=aow)
+    out = dot_rows(ao[1:4], dm_aow, out=out)
+    if xctype == 'LDA':
+        return out
+
+    aow = _make_dR_dao_w(ao, wv[:4], out=buf3)
+    if xctype == 'GGA':
+        dm_ao = fac
+    else:
+        dm_ao = cupy.dot(c, fac[0], out=dm_aow)
+    dot_rows(aow, dm_ao, out=out, beta=1.)
+
+    if xctype == 'MGGA':
+        c_ao1 = cupy.multiply(fac[1:], wv[4], out=fac[1:])
+        dm_ao1 = ndarray((3, nao, ngrids), buffer=buf3)
+        for j in range(3):
+            cupy.dot(c, c_ao1[j], out=dm_ao1[j])
+        tau = dot_rows(ao[4:10], dm_ao1)
+        out += tau.reshape(18, nao)[_TAU_TERMS].sum(axis=1)
+    return out
 
 def get_exc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
             max_memory=2000, verbose=None):
