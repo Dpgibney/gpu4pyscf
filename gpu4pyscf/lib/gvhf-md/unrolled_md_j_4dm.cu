@@ -21,19 +21,21 @@
     KERNEL<<<blocks, threads, SHMSIZE>>>(*envs, *jk, *bounds, q_cond_ij, q_cond_kl, dm_size)
 
 
-// TILEX=21, TILEY=21
+// TILEX=21 (largest; run-time tilex), TILEY=21
 __global__ static
 void md_j_4dm_0_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 336;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 336;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
     }
-    if (pair_ij_mapping == pair_kl_mapping && task_ij0+336 <= task_kl0) {
+    if (pair_ij_mapping == pair_kl_mapping && task_ij0+16*tilex <= task_kl0) {
         return;
     }
     int sq_id = tx + 16 * ty;
@@ -97,8 +99,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
     for (int n = thread_id; n < 2688; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 21; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 336 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -151,7 +153,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
             if (pair_ij_mapping == pair_kl_mapping && task_ij0+16 <= task_kl0) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*21] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*21] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -324,14 +326,16 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
     }
 } }
 
-// TILEX=48, TILEY=21
+// TILEX=48 (largest; run-time tilex), TILEY=21
 __global__ static
 void md_j_4dm_1_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 336;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -397,8 +401,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
     for (int n = thread_id; n < 2688; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -448,7 +452,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*21] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -692,19 +696,21 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
     }
 } }
 
-// TILEX=6, TILEY=6
+// TILEX=6 (largest; run-time tilex), TILEY=6
 __global__ static
 void md_j_4dm_1_1(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 96;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 96;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
     }
-    if (pair_ij_mapping == pair_kl_mapping && task_ij0+96 <= task_kl0) {
+    if (pair_ij_mapping == pair_kl_mapping && task_ij0+16*tilex <= task_kl0) {
         return;
     }
     int sq_id = tx + 16 * ty;
@@ -768,8 +774,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
     for (int n = thread_id; n < 3072; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 6; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 96 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -822,7 +828,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
             if (pair_ij_mapping == pair_kl_mapping && task_ij0+16 <= task_kl0) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*6] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*6] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -1460,14 +1466,16 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
     }
 } }
 
-// TILEX=48, TILEY=16
+// TILEX=48 (largest; run-time tilex), TILEY=16
 __global__ static
 void md_j_4dm_2_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 256;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -1533,8 +1541,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
     for (int n = thread_id; n < 2048; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -1584,7 +1592,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*16] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -1987,14 +1995,16 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 8) {
     }
 } }
 
-// TILEX=48, TILEY=10
+// TILEX=48 (largest; run-time tilex), TILEY=10
 __global__ static
 void md_j_4dm_2_1(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 160;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -2060,8 +2070,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
     for (int n = thread_id; n < 2560; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -2111,7 +2121,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*10] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -3010,19 +3020,21 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
     }
 } }
 
-// TILEX=4, TILEY=4
+// TILEX=4 (largest; run-time tilex), TILEY=4
 __global__ static
 void md_j_4dm_2_2(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 64;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 64;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
     }
-    if (pair_ij_mapping == pair_kl_mapping && task_ij0+64 <= task_kl0) {
+    if (pair_ij_mapping == pair_kl_mapping && task_ij0+16*tilex <= task_kl0) {
         return;
     }
     int sq_id = tx + 16 * ty;
@@ -3086,8 +3098,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
     for (int n = thread_id; n < 2560; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 4; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 64 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -3140,7 +3152,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
             if (pair_ij_mapping == pair_kl_mapping && task_ij0+16 <= task_kl0) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*4] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*4] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -5183,14 +5195,16 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
     }
 } }
 
-// TILEX=48, TILEY=21
+// TILEX=48 (largest; run-time tilex), TILEY=21
 __global__ static
 void md_j_4dm_3_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 336;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -5256,8 +5270,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
     for (int n = thread_id; n < 1344; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -5307,7 +5321,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*21] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -5827,14 +5841,16 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
     }
 } }
 
-// TILEX=48, TILEY=6
+// TILEX=48 (largest; run-time tilex), TILEY=6
 __global__ static
 void md_j_4dm_3_1(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 96;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -5900,8 +5916,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
     for (int n = thread_id; n < 1536; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -5951,7 +5967,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*6] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -7716,14 +7732,16 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 4) {
     }
 } }
 
-// TILEX=48, TILEY=24
+// TILEX=48 (largest; run-time tilex), TILEY=24
 __global__ static
 void md_j_4dm_4_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 384;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -7789,8 +7807,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 2) {
     for (int n = thread_id; n < 768; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -7840,7 +7858,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 2) {
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*24] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -8295,14 +8313,16 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 2) {
     }
 } }
 
-// TILEX=48, TILEY=9
+// TILEX=48 (largest; run-time tilex), TILEY=9
 __global__ static
 void md_j_4dm_4_1(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 144;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -8368,8 +8388,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 2) {
     for (int n = thread_id; n < 1152; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -8419,7 +8439,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 2) {
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*9] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -9929,14 +9949,16 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 2) {
     }
 } }
 
-// TILEX=48, TILEY=12
+// TILEX=48 (largest; run-time tilex), TILEY=12
 __global__ static
 void md_j_4dm_5_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 192;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -10002,8 +10024,8 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 2) {
     for (int n = thread_id; n < 384; n += 256) {
         vj_kl_cache[n] = 0.;
     }
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             continue;
         }
@@ -10053,7 +10075,7 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 2) {
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*12] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -10990,6 +11012,24 @@ for (int dm_offset = 0; dm_offset < jk.n_dm; dm_offset += 2) {
     }
 } }
 
+#include <algorithm>
+// gridDim.x of an unrolled J launch: bra tiles of at most tilex_max batches of 16 pairs, and enough of them
+// that the grid has at least MD_J_BLOCKS_PER_SM blocks per SM (twice that if bra and ket share their pairs)
+#define MD_J_BLOCKS_PER_SM 64
+static int md_j_grid_x(int npairs_ij, int tilex_max, int grid_y, int diagonal)
+{
+    int dev, n_sm;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&n_sm, cudaDevAttrMultiProcessorCount, dev);
+    int nbatch = (npairs_ij + 15) / 16;
+    int gx = (nbatch + tilex_max - 1) / tilex_max;
+    int want = MD_J_BLOCKS_PER_SM * n_sm * (diagonal ? 2 : 1);
+    if (gx * grid_y < want) {
+        gx = std::min(nbatch, (want + grid_y - 1) / grid_y);
+    }
+    return std::max(gx, 1);
+}
+
 int md_j_4dm_unrolled(RysIntEnvVars *envs, JKMatrix *jk, MDBoundsInfo *bounds,
                       float *q_cond_ij, float *q_cond_kl, double omega, int dm_size)
 {
@@ -11009,65 +11049,76 @@ int md_j_4dm_unrolled(RysIntEnvVars *envs, JKMatrix *jk, MDBoundsInfo *bounds,
     switch (ijkl) {
     case 0: { // lij=0, lkl=0, tilex=21, tiley=21
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 335) / 336, (npairs_kl + 335) / 336, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 21, (npairs_kl + 335) / 336, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 335) / 336, 1);
         cudaFuncSetAttribute(md_j_4dm_0_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6080+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4dm_0_0, (6080+addition_buf)*sizeof(double)); break;
     } break;
     case 9: { // lij=1, lkl=0, tilex=48, tiley=21
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 335) / 336, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 335) / 336, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 335) / 336, 1);
         cudaFuncSetAttribute(md_j_4dm_1_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6080+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4dm_1_0, (6080+addition_buf)*sizeof(double)); break;
     } break;
     case 10: { // lij=1, lkl=1, tilex=6, tiley=6
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 95) / 96, (npairs_kl + 95) / 96, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 6, (npairs_kl + 95) / 96, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 95) / 96, 1);
         LAUNCH_KERNEL(md_j_4dm_1_1, (5568+addition_buf)*sizeof(double)); break;
     } break;
     case 18: { // lij=2, lkl=0, tilex=48, tiley=16
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 255) / 256, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 255) / 256, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 255) / 256, 1);
         cudaFuncSetAttribute(md_j_4dm_2_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (5952+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4dm_2_0, (5952+addition_buf)*sizeof(double)); break;
     } break;
     case 19: { // lij=2, lkl=1, tilex=48, tiley=10
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 159) / 160, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 159) / 160, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 159) / 160, 1);
         cudaFuncSetAttribute(md_j_4dm_2_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (5952+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4dm_2_1, (5952+addition_buf)*sizeof(double)); break;
     } break;
     case 20: { // lij=2, lkl=2, tilex=4, tiley=4
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 63) / 64, (npairs_kl + 63) / 64, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 4, (npairs_kl + 63) / 64, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 63) / 64, 1);
         cudaFuncSetAttribute(md_j_4dm_2_2, cudaFuncAttributeMaxDynamicSharedMemorySize, (6080+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4dm_2_2, (6080+addition_buf)*sizeof(double)); break;
     } break;
     case 27: { // lij=3, lkl=0, tilex=48, tiley=21
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 335) / 336, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 335) / 336, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 335) / 336, 1);
         cudaFuncSetAttribute(md_j_4dm_3_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6080+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4dm_3_0, (6080+addition_buf)*sizeof(double)); break;
     } break;
     case 28: { // lij=3, lkl=1, tilex=48, tiley=6
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 95) / 96, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 95) / 96, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 95) / 96, 1);
         LAUNCH_KERNEL(md_j_4dm_3_1, (5824+addition_buf)*sizeof(double)); break;
     } break;
     case 36: { // lij=4, lkl=0, tilex=48, tiley=24
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 383) / 384, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 383) / 384, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 383) / 384, 1);
         cudaFuncSetAttribute(md_j_4dm_4_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6048+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4dm_4_0, (6048+addition_buf)*sizeof(double)); break;
     } break;
     case 37: { // lij=4, lkl=1, tilex=48, tiley=9
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 143) / 144, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 143) / 144, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 143) / 144, 1);
         cudaFuncSetAttribute(md_j_4dm_4_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (5984+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4dm_4_1, (5984+addition_buf)*sizeof(double)); break;
     } break;
     case 45: { // lij=5, lkl=0, tilex=48, tiley=12
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 191) / 192, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 191) / 192, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 191) / 192, 1);
         cudaFuncSetAttribute(md_j_4dm_5_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6080+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4dm_5_0, (6080+addition_buf)*sizeof(double)); break;
     } break;

@@ -22,7 +22,7 @@
     KERNEL<<<blocks, threads, SHMSIZE>>>(*envs, *jk, *bounds, q_cond_ij, q_cond_kl)
 
 
-// TILEX=30, TILEY=30
+// TILEX=30 (largest; run-time tilex), TILEY=30
 #if CUDA_VERSION >= 12040
 __global__ __maxnreg__(128) static
 #else
@@ -31,14 +31,16 @@ __global__ static
 void md_j_0_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 480;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 480;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
     }
-    if (pair_ij_mapping == pair_kl_mapping && task_ij0+480 <= task_kl0) {
+    if (pair_ij_mapping == pair_kl_mapping && task_ij0+16*tilex <= task_kl0) {
         return;
     }
     int sq_id = tx + 16 * ty;
@@ -93,8 +95,8 @@ void md_j_0_0(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 30; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 480 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -145,7 +147,7 @@ void md_j_0_0(KERNEL_ARGS)
             if (pair_ij_mapping == pair_kl_mapping && task_ij0+16 <= task_kl0) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*30] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*30] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -223,7 +225,7 @@ void md_j_0_0(KERNEL_ARGS)
     }
 }
 
-// TILEX=48, TILEY=23
+// TILEX=48 (largest; run-time tilex), TILEY=23
 #if CUDA_VERSION >= 12040
 __global__ __maxnreg__(128) static
 #else
@@ -232,9 +234,11 @@ __global__ static
 void md_j_1_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 368;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -291,8 +295,8 @@ void md_j_1_0(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -340,7 +344,7 @@ void md_j_1_0(KERNEL_ARGS)
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*23] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -423,7 +427,7 @@ void md_j_1_0(KERNEL_ARGS)
     }
 }
 
-// TILEX=10, TILEY=10
+// TILEX=10 (largest; run-time tilex), TILEY=10
 #if CUDA_VERSION >= 12040
 __global__ __maxnreg__(128) static
 #else
@@ -432,14 +436,16 @@ __global__ static
 void md_j_1_1(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 160;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 160;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
     }
-    if (pair_ij_mapping == pair_kl_mapping && task_ij0+160 <= task_kl0) {
+    if (pair_ij_mapping == pair_kl_mapping && task_ij0+16*tilex <= task_kl0) {
         return;
     }
     int sq_id = tx + 16 * ty;
@@ -494,8 +500,8 @@ void md_j_1_1(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 10; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 160 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -546,7 +552,7 @@ void md_j_1_1(KERNEL_ARGS)
             if (pair_ij_mapping == pair_kl_mapping && task_ij0+16 <= task_kl0) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*10] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*10] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -684,7 +690,7 @@ void md_j_1_1(KERNEL_ARGS)
     }
 }
 
-// TILEX=48, TILEY=16
+// TILEX=48 (largest; run-time tilex), TILEY=16
 #if CUDA_VERSION >= 12040
 __global__ __maxnreg__(128) static
 #else
@@ -693,9 +699,11 @@ __global__ static
 void md_j_2_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 256;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -752,8 +760,8 @@ void md_j_2_0(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -801,7 +809,7 @@ void md_j_2_0(KERNEL_ARGS)
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*16] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -905,7 +913,7 @@ void md_j_2_0(KERNEL_ARGS)
     }
 }
 
-// TILEX=48, TILEY=30
+// TILEX=48 (largest; run-time tilex), TILEY=30
 #if CUDA_VERSION >= 12040
 __global__ __maxnreg__(128) static
 #else
@@ -914,9 +922,11 @@ __global__ static
 void md_j_2_1(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 480;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -973,8 +983,8 @@ void md_j_2_1(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -1022,7 +1032,7 @@ void md_j_2_1(KERNEL_ARGS)
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*30] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -1223,7 +1233,7 @@ void md_j_2_1(KERNEL_ARGS)
     }
 }
 
-// TILEX=14, TILEY=14
+// TILEX=14 (largest; run-time tilex), TILEY=14
 #if CUDA_VERSION >= 12040
 __global__ __maxnreg__(128) static
 #else
@@ -1232,14 +1242,16 @@ __global__ static
 void md_j_2_2(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 224;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 224;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
     }
-    if (pair_ij_mapping == pair_kl_mapping && task_ij0+224 <= task_kl0) {
+    if (pair_ij_mapping == pair_kl_mapping && task_ij0+16*tilex <= task_kl0) {
         return;
     }
     int sq_id = tx + 16 * ty;
@@ -1294,8 +1306,8 @@ void md_j_2_2(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 14; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 224 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -1346,7 +1358,7 @@ void md_j_2_2(KERNEL_ARGS)
             if (pair_ij_mapping == pair_kl_mapping && task_ij0+16 <= task_kl0) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*14] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*14] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -1741,7 +1753,7 @@ void md_j_2_2(KERNEL_ARGS)
     }
 }
 
-// TILEX=48, TILEY=46
+// TILEX=48 (largest; run-time tilex), TILEY=46
 #if CUDA_VERSION >= 12040
 __global__ __maxnreg__(128) static
 #else
@@ -1750,9 +1762,11 @@ __global__ static
 void md_j_3_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 736;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -1809,8 +1823,8 @@ void md_j_3_0(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -1858,7 +1872,7 @@ void md_j_3_0(KERNEL_ARGS)
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*46] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -2001,14 +2015,16 @@ void md_j_3_0(KERNEL_ARGS)
     }
 }
 
-// TILEX=48, TILEY=24
+// TILEX=48 (largest; run-time tilex), TILEY=24
 __global__ static
 void md_j_3_1(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 384;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -2065,8 +2081,8 @@ void md_j_3_1(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -2114,7 +2130,7 @@ void md_j_3_1(KERNEL_ARGS)
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*24] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -2429,14 +2445,16 @@ void md_j_3_1(KERNEL_ARGS)
     }
 }
 
-// TILEX=48, TILEY=11
+// TILEX=48 (largest; run-time tilex), TILEY=11
 __global__ static
 void md_j_3_2(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 176;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -2493,8 +2511,8 @@ void md_j_3_2(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -2542,7 +2560,7 @@ void md_j_3_2(KERNEL_ARGS)
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*11] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -3188,14 +3206,16 @@ void md_j_3_2(KERNEL_ARGS)
     }
 }
 
-// TILEX=48, TILEY=36
+// TILEX=48 (largest; run-time tilex), TILEY=36
 __global__ static
 void md_j_4_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 576;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -3252,8 +3272,8 @@ void md_j_4_0(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -3301,7 +3321,7 @@ void md_j_4_0(KERNEL_ARGS)
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*36] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -3508,14 +3528,16 @@ void md_j_4_0(KERNEL_ARGS)
     }
 }
 
-// TILEX=48, TILEY=18
+// TILEX=48 (largest; run-time tilex), TILEY=18
 __global__ static
 void md_j_4_1(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 288;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -3572,8 +3594,8 @@ void md_j_4_1(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -3621,7 +3643,7 @@ void md_j_4_1(KERNEL_ARGS)
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*18] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -4111,14 +4133,16 @@ void md_j_4_1(KERNEL_ARGS)
     }
 }
 
-// TILEX=48, TILEY=26
+// TILEX=48 (largest; run-time tilex), TILEY=26
 __global__ static
 void md_j_5_0(KERNEL_ARGS)
 {
     KERNEL_SETUP();
+    // the bra tile, from the grid that md_j_grid_x chose
+    int tilex = ((bounds.npairs_ij + 15) / 16 + gridDim.x - 1) / gridDim.x;
     int *pair_ij_mapping = bounds.pair_ij_mapping;
     int *pair_kl_mapping = bounds.pair_kl_mapping;
-    int task_ij0 = block_x * 768;
+    int task_ij0 = block_x * (16*tilex);
     int task_kl0 = block_y * 416;
     if (q_cond_ij[task_ij0] + q_cond_kl[task_kl0] < bounds.cutoff) {
         return;
@@ -4175,8 +4199,8 @@ void md_j_5_0(KERNEL_ARGS)
         }
     }
 
-    for (int batch_ij = 0; batch_ij < 48; ++batch_ij) {
-        int task_ij0 = blockIdx.x * 768 + batch_ij * 16;
+    for (int batch_ij = 0; batch_ij < tilex; ++batch_ij) {
+        int task_ij0 = blockIdx.x * (16*tilex) + batch_ij * 16;
         if (task_ij0 >= npairs_ij) {
             break;
         }
@@ -4224,7 +4248,7 @@ void md_j_5_0(KERNEL_ARGS)
             if (task_kl0 >= npairs_kl) {
                 break;
             }
-            if (qd_ij_max[batch_ij+blockIdx.x*48] + q_cond_kl[task_kl0] < bounds.cutoff &&
+            if (qd_ij_max[batch_ij+blockIdx.x*tilex] + q_cond_kl[task_kl0] < bounds.cutoff &&
                 qd_kl_max[batch_kl+blockIdx.y*26] + q_cond_ij[task_ij0] < bounds.cutoff) {
                 continue;
             }
@@ -4651,6 +4675,24 @@ void md_j_5_0(KERNEL_ARGS)
     }
 }
 
+#include <algorithm>
+// gridDim.x of an unrolled J launch: bra tiles of at most tilex_max batches of 16 pairs, and enough of them
+// that the grid has at least MD_J_BLOCKS_PER_SM blocks per SM (twice that if bra and ket share their pairs)
+#define MD_J_BLOCKS_PER_SM 64
+static int md_j_grid_x(int npairs_ij, int tilex_max, int grid_y, int diagonal)
+{
+    int dev, n_sm;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&n_sm, cudaDevAttrMultiProcessorCount, dev);
+    int nbatch = (npairs_ij + 15) / 16;
+    int gx = (nbatch + tilex_max - 1) / tilex_max;
+    int want = MD_J_BLOCKS_PER_SM * n_sm * (diagonal ? 2 : 1);
+    if (gx * grid_y < want) {
+        gx = std::min(nbatch, (want + grid_y - 1) / grid_y);
+    }
+    return std::max(gx, 1);
+}
+
 int md_j_unrolled(RysIntEnvVars *envs, JKMatrix *jk, MDBoundsInfo *bounds,
                   float *q_cond_ij, float *q_cond_kl, double omega)
 {
@@ -4670,69 +4712,81 @@ int md_j_unrolled(RysIntEnvVars *envs, JKMatrix *jk, MDBoundsInfo *bounds,
     switch (ijkl) {
     case 0: { // lij=0, lkl=0, tilex=30, tiley=30
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 479) / 480, (npairs_kl + 479) / 480, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 30, (npairs_kl + 479) / 480, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 479) / 480, 1);
         LAUNCH_KERNEL(md_j_0_0, (2992+addition_buf)*sizeof(double)); break;
     } break;
     case 11: { // lij=1, lkl=0, tilex=48, tiley=23
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 367) / 368, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 367) / 368, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 367) / 368, 1);
         LAUNCH_KERNEL(md_j_1_0, (2992+addition_buf)*sizeof(double)); break;
     } break;
     case 12: { // lij=1, lkl=1, tilex=10, tiley=10
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 159) / 160, (npairs_kl + 159) / 160, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 10, (npairs_kl + 159) / 160, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 159) / 160, 1);
         LAUNCH_KERNEL(md_j_1_1, (2944+addition_buf)*sizeof(double)); break;
     } break;
     case 22: { // lij=2, lkl=0, tilex=48, tiley=16
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 255) / 256, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 255) / 256, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 255) / 256, 1);
         LAUNCH_KERNEL(md_j_2_0, (3040+addition_buf)*sizeof(double)); break;
     } break;
     case 23: { // lij=2, lkl=1, tilex=48, tiley=30
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 479) / 480, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 479) / 480, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 479) / 480, 1);
         cudaFuncSetAttribute(md_j_2_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (6112+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_2_1, (6112+addition_buf)*sizeof(double)); break;
     } break;
     case 24: { // lij=2, lkl=2, tilex=14, tiley=14
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 223) / 224, (npairs_kl + 223) / 224, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 14, (npairs_kl + 223) / 224, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 223) / 224, 1);
         cudaFuncSetAttribute(md_j_2_2, cudaFuncAttributeMaxDynamicSharedMemorySize, (5920+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_2_2, (5920+addition_buf)*sizeof(double)); break;
     } break;
     case 33: { // lij=3, lkl=0, tilex=48, tiley=46
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 735) / 736, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 735) / 736, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 735) / 736, 1);
         cudaFuncSetAttribute(md_j_3_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6112+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_3_0, (6112+addition_buf)*sizeof(double)); break;
     } break;
     case 34: { // lij=3, lkl=1, tilex=48, tiley=24
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 383) / 384, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 383) / 384, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 383) / 384, 1);
         cudaFuncSetAttribute(md_j_3_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (6016+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_3_1, (6016+addition_buf)*sizeof(double)); break;
     } break;
     case 35: { // lij=3, lkl=2, tilex=48, tiley=11
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 175) / 176, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 175) / 176, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 175) / 176, 1);
         cudaFuncSetAttribute(md_j_3_2, cudaFuncAttributeMaxDynamicSharedMemorySize, (5920+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_3_2, (5920+addition_buf)*sizeof(double)); break;
     } break;
     case 44: { // lij=4, lkl=0, tilex=48, tiley=36
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 575) / 576, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 575) / 576, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 575) / 576, 1);
         cudaFuncSetAttribute(md_j_4_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6064+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4_0, (6064+addition_buf)*sizeof(double)); break;
     } break;
     case 45: { // lij=4, lkl=1, tilex=48, tiley=18
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 287) / 288, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 287) / 288, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 287) / 288, 1);
         cudaFuncSetAttribute(md_j_4_1, cudaFuncAttributeMaxDynamicSharedMemorySize, (6000+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_4_1, (6000+addition_buf)*sizeof(double)); break;
     } break;
     case 55: { // lij=5, lkl=0, tilex=48, tiley=26
         dim3 threads(16, 16);
-        dim3 blocks((npairs_ij + 767) / 768, (npairs_kl + 415) / 416, 1);
+        dim3 blocks(md_j_grid_x(npairs_ij, 48, (npairs_kl + 415) / 416, bounds->pair_ij_mapping == bounds->pair_kl_mapping),
+                    (npairs_kl + 415) / 416, 1);
         cudaFuncSetAttribute(md_j_5_0, cudaFuncAttributeMaxDynamicSharedMemorySize, (6112+addition_buf)*sizeof(double));
         LAUNCH_KERNEL(md_j_5_0, (6112+addition_buf)*sizeof(double)); break;
     } break;
