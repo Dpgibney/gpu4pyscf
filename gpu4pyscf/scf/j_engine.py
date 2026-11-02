@@ -41,6 +41,10 @@ PTR_BAS_COORD = 7
 LMAX = 4
 SHM_SIZE = shm_size - 1024
 THREADS = 256
+# The least blocks per SM a launch of the generic MD J kernel gets (twice that for
+# diagonal classes): its bra tile is cut down to reach it (_fill_sms_tilex), as the
+# unrolled kernels choose theirs at run time.
+J_BLOCKS_PER_SM = 64
 
 libvhf_md = load_library('libgvhf_md')
 libvhf_md.MD_build_j.restype = ctypes.c_int
@@ -191,6 +195,7 @@ class _VHFOpt(jk._VHFOpt):
             timing_collection = jk._TimingCollector(log.timer_debug1)
             kern_counts = 0
             kern = libvhf_md.MD_build_j
+            n_sm = cp.cuda.Device().attributes['MultiProcessorCount']
             rys_envs = self.rys_envs
 
             for task in tasks:
@@ -204,7 +209,8 @@ class _VHFOpt(jk._VHFOpt):
                     continue
                 pair_ij_loc = _pair_loc_gpu[task_offsets[i,j]:]
                 pair_kl_loc = _pair_loc_gpu[task_offsets[k,l]:]
-                scheme = schemes[task]
+                scheme = _fill_sms_tilex(schemes[task], npairs_ij, npairs_kl,
+                                         (i, j) == (k, l), n_sm)
                 err = kern(
                     ctypes.cast(vj_xyz.data.ptr, ctypes.c_void_p),
                     ctypes.cast(dm_xyz.data.ptr, ctypes.c_void_p),
@@ -316,6 +322,25 @@ VJ_IJ_REGISTERS = 11
 MULTI_VJ_IJ_REGISTERS = 8
 RT_TMP_REGISTERS = 31
 RT2_IDX_CACHE_SIZE = 35 * 56
+def _fill_sms_tilex(scheme, npairs_ij, npairs_kl, diagonal, n_sm):
+    '''The scheme with the generic kernel's bra tile (scheme[3], in batches of
+    threads_ij pairs) cut down so that the launch has at least J_BLOCKS_PER_SM
+    blocks per SM, twice that for diagonal classes (half of their blocks lie above
+    the diagonal). The tile sets neither shared memory nor the screening, which is
+    per batch (qd_ij_max), so the integrals are the same; only the order of the
+    atomic adds changes. Large tiles leave SMs idle on small systems and the
+    tail of dense first tiles on large ones.
+    '''
+    threads_ij, threads_kl, gout_stride, tilex, tiley, buflen = scheme
+    nbatch = (npairs_ij + threads_ij - 1) // threads_ij
+    grid_y = (npairs_kl + threads_kl * tiley - 1) // (threads_kl * tiley)
+    grid_x = (nbatch + tilex - 1) // tilex
+    want = J_BLOCKS_PER_SM * n_sm * (2 if diagonal else 1)
+    if grid_x * grid_y < want:
+        grid_x = min(nbatch, (want + grid_y - 1) // grid_y)
+        tilex = (nbatch + grid_x - 1) // grid_x
+    return threads_ij, threads_kl, gout_stride, tilex, tiley, buflen
+
 def _md_j_engine_quartets_scheme(ls, shm_size=SHM_SIZE, n_dm=1):
     vj_ij_registers = VJ_IJ_REGISTERS
     if n_dm > 1:
