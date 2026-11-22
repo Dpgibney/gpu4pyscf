@@ -304,6 +304,7 @@ class SMD(lib.StreamObject):
     _get_vind = pcm.PCM._get_vind
     _get_qsym = pcm.PCM._get_qsym
     _get_vgrids = pcm.PCM._get_vgrids
+    _grid_integrals = pcm.PCM._grid_integrals
     _get_v = pcm.PCM._get_v
     _get_vmat = pcm.PCM._get_vmat
     _B_dot_x = pcm.PCM._B_dot_x

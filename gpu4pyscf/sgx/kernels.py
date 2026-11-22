@@ -49,7 +49,7 @@ import math
 import numpy as np
 import cupy as cp
 
-__all__ = ['get_kernel', 'boys_table', 'cart_tuples', 'NREC', 'LMAX']
+__all__ = ['get_kernel', 'get_grid_kernel', 'boys_table', 'cart_tuples', 'NREC', 'LMAX']
 
 # highest angular momentum of a shell
 LMAX = 4
@@ -89,13 +89,15 @@ def boys_exact(mmax, t):
     return f
 
 _boys_tables = {}
-def boys_table(L, dtype='double'):
+def boys_table(L, dtype='double', order=None, tmax=None):
     '''The rows [exp(-T_i), F_L(T_i), F_{L+1}(T_i)/1!, ..., F_{L+K}(T_i)/K!]
     of the kernels of total angular momentum L, on the device'''
-    key = (L, dtype, cp.cuda.Device().id)
+    K = BOYS_ORDER[dtype] if order is None else order
+    if tmax is None:
+        tmax = boys_tmax(L)
+    key = (L, dtype, K, tmax, cp.cuda.Device().id)
     if key not in _boys_tables:
-        K = BOYS_ORDER[dtype]
-        n = int(round(boys_tmax(L) / BOYS_STEP)) + 2
+        n = int(round(tmax / BOYS_STEP)) + 2
         t = np.arange(n) * np.longdouble(BOYS_STEP)
         f = boys_exact(L+K, t)
         tab = np.empty((n, K+2), dtype=np.longdouble)
@@ -125,59 +127,62 @@ def _fnum(x, dtype):
     return r + 'f' if dtype == 'float' else r
 
 
+def _boys_lines(L, dtype, pre, tvar, coef, scale, order, tmax):
+    '''Lines that set {pre}0..{pre}L to coef F_m(tvar), times scale^m if scale
+    is the name of a factor per order: from the table of the given order of
+    its Taylor series below tmax, the asymptotic form beyond'''
+    K = order
+    nrow = K + 2
+    c = lambda x: _fnum(x, dtype)
+    rsq = 'rsqrt' if dtype == 'double' else 'rsqrtf'
+    out = ['REAL %s;' % ', '.join('%s%d' % (pre, m) for m in range(L+1))]
+    out.append('if (%s < %s) {' % (tvar, c(tmax)))
+    out.append('    const int it = (int)(%s * %s + %s);' % (tvar, c(1/BOYS_STEP), c(.5)))
+    out.append('    const REAL x = (REAL)it * %s - %s;' % (c(BOYS_STEP), tvar))
+    out.append('    const REAL* __restrict__ row = boys + it * %d;' % nrow)
+    out.append('    REAL s = row[%d];' % (K+1))
+    for k in range(K, 0, -1):
+        out.append('    s = s * x + row[%d];' % k)
+    if L == 0:
+        out.append('    %s0 = s * %s;' % (pre, coef))
+    else:
+        # exp(-T) = exp(-T_i) exp(x)
+        out.append('    REAL ex = %s;' % c(1/math.factorial(K)))
+        for k in range(K-1, -1, -1):
+            out.append('    ex = ex * x + %s;' % c(1/math.factorial(k)))
+        out.append('    const REAL e = row[0] * ex * %s;' % coef)
+        out.append('    const REAL t2 = %s + %s;' % (tvar, tvar))
+        out.append('    %s%d = s * %s;' % (pre, L, coef))
+        for m in range(L, 0, -1):
+            out.append('    %s%d = (t2 * %s%d + e) * %s;' % (pre, m-1, pre, m, c(1/(2*m-1))))
+        if scale is not None:
+            out.append('    REAL sc = %s;' % scale)
+            for m in range(1, L+1):
+                out.append('    %s%d *= sc;' % (pre, m))
+                if m < L:
+                    out.append('    sc *= %s;' % scale)
+    out.append('} else {')
+    out.append('    const REAL r = %s(%s);' % (rsq, tvar))
+    out.append('    %s0 = %s * %s * r;' % (pre, c(math.sqrt(math.pi)/2), coef))
+    if L > 0:
+        if scale is None:
+            out.append('    const REAL hr = %s * r * r;' % c(.5))
+        else:
+            out.append('    const REAL hr = %s * r * r * %s;' % (c(.5), scale))
+        for m in range(1, L+1):
+            if m == 1:
+                out.append('    %s1 = %s0 * hr;' % (pre, pre))
+            else:
+                out.append('    %s%d = %s%d * (%s * hr);' % (pre, m, pre, m-1, c(2*m-1)))
+    out.append('}')
+    return out
+
+
 def _gen_boys(L, mode, dtype):
     '''Lines that set f0..fL to the base values [0|0]^(m) of the primitive
     pair, from T, the pointer q to its record and the table boys'''
-    K = BOYS_ORDER[dtype]
-    nrow = K + 2
-    tmax = boys_tmax(L)
-    c = lambda x: _fnum(x, dtype)
-    rsq = 'rsqrt' if dtype == 'double' else 'rsqrtf'
-
     def one(pre, tvar, coef, scale):
-        # pre: prefix of the outputs; scale: None or the name of theta, the
-        # factor per order
-        out = ['REAL %s;' % ', '.join('%s%d' % (pre, m) for m in range(L+1))]
-        out.append('if (%s < %s) {' % (tvar, c(tmax)))
-        out.append('    const int it = (int)(%s * %s + %s);' % (tvar, c(1/BOYS_STEP), c(.5)))
-        out.append('    const REAL x = (REAL)it * %s - %s;' % (c(BOYS_STEP), tvar))
-        out.append('    const REAL* __restrict__ row = boys + it * %d;' % nrow)
-        out.append('    REAL s = row[%d];' % (K+1))
-        for k in range(K, 0, -1):
-            out.append('    s = s * x + row[%d];' % k)
-        if L == 0:
-            out.append('    %s0 = s * %s;' % (pre, coef))
-        else:
-            # exp(-T) = exp(-T_i) exp(x)
-            out.append('    REAL ex = %s;' % c(1/math.factorial(K)))
-            for k in range(K-1, -1, -1):
-                out.append('    ex = ex * x + %s;' % c(1/math.factorial(k)))
-            out.append('    const REAL e = row[0] * ex * %s;' % coef)
-            out.append('    const REAL t2 = %s + %s;' % (tvar, tvar))
-            out.append('    %s%d = s * %s;' % (pre, L, coef))
-            for m in range(L, 0, -1):
-                out.append('    %s%d = (t2 * %s%d + e) * %s;' % (pre, m-1, pre, m, c(1/(2*m-1))))
-            if scale is not None:
-                out.append('    REAL sc = %s;' % scale)
-                for m in range(1, L+1):
-                    out.append('    %s%d *= sc;' % (pre, m))
-                    if m < L:
-                        out.append('    sc *= %s;' % scale)
-        out.append('} else {')
-        out.append('    const REAL r = %s(%s);' % (rsq, tvar))
-        out.append('    %s0 = %s * %s * r;' % (pre, c(math.sqrt(math.pi)/2), coef))
-        if L > 0:
-            if scale is None:
-                out.append('    const REAL hr = %s * r * r;' % c(.5))
-            else:
-                out.append('    const REAL hr = %s * r * r * %s;' % (c(.5), scale))
-            for m in range(1, L+1):
-                if m == 1:
-                    out.append('    %s1 = %s0 * hr;' % (pre, pre))
-                else:
-                    out.append('    %s%d = %s%d * (%s * hr);' % (pre, m, pre, m-1, c(2*m-1)))
-        out.append('}')
-        return out
+        return _boys_lines(L, dtype, pre, tvar, coef, scale, BOYS_ORDER[dtype], boys_tmax(L))
 
     lines = []
     if mode == 'full':
@@ -198,9 +203,11 @@ def _gen_boys(L, mode, dtype):
     return lines
 
 
-def _gen_vrr(L, lmin):
+def _gen_vrr(L, lmin, accumulate=True):
     '''Lines of the vertical recurrence, from f0..fL to v{e}_0 for the powers
-    e of degree lmin..L, which are added to the accumulators E{e}'''
+    e of degree lmin..L, which are added to the accumulators E{e}. Without
+    accumulate: no such lines, and the names of the values of these powers
+    are returned in the place of the number of terms.'''
     need = {}
     order = []
     diffs = []
@@ -251,6 +258,8 @@ def _gen_vrr(L, lmin):
                 lines.append('const REAL d%s_%d = %s - %s;' % (_s(e2), m, v(e2, m), v(e2, m+1)))
             expr += ' + c%d * d%s_%d' % (e[d]-1, _s(e2), m)
         lines.append('const REAL %s = %s;' % (v(e, m), expr))
+    if not accumulate:
+        return lines, targets, [v(e, 0) for e in targets]
     for e in targets:
         lines.append('E%s += %s;' % (_s(e), v(e, 0)))
     return lines, targets, len(order)
@@ -410,7 +419,166 @@ void %(name)s(REAL* __restrict__ G, const REAL* __restrict__ F, const REAL* __re
            post=ind(post, 8), store=ind(store, 8))
 
 
+# The J-type contractions of the same integrals, the potential of a density
+# at the points and the matrix of charges at the points, stand in for integrals
+# in double precision: their Boys functions take two terms more of the Taylor
+# series and the asymptotic form later, for 1e-15.
+GRID_BOYS_ORDER = {'double': 8, 'float': 3}
+
+def grid_boys_tmax(L, dtype='double'):
+    return (38 if dtype == 'double' else 30) + 4 * L
+
+def _grid_boys(L, gauss, dtype, coef):
+    '''Lines of a primitive pair on a point for these kernels: the base values
+    f0..fL of 1/r (coef the coefficient), or, with gauss, of the potential of
+    a normalized Gaussian of exponent zeta at the point, erf(omega r)/r with
+    omega^2 = zeta: theta = zeta / (zeta + p) from one reciprocal square root'''
+    order = GRID_BOYS_ORDER[dtype]
+    tmax = grid_boys_tmax(L, dtype)
+    if not gauss:
+        return ['const REAL cf = %s;' % coef] + _boys_lines(L, dtype, 'f', 'T', 'cf', None, order, tmax)
+    rsq = 'rsqrt' if dtype == 'double' else 'rsqrtf'
+    lines = ['const REAL sth = omega * %s(p + zeta);' % rsq,
+             'const REAL theta = sth * sth;',
+             'const REAL Tl = theta * T;',
+             'const REAL cf = %s * sth;' % coef]
+    return lines + _boys_lines(L, dtype, 'f', 'Tl', 'cf', 'theta', order, tmax)
+
+def grid_kernel_name(kind, li, lj, gauss, dtype):
+    return 'sgx_%s_%d%d_%s_%s' % (kind, li, lj, 'gauss' if gauss else 'point', dtype)
+
+def potential_kernel_source(li, lj, gauss=False, dtype='double'):
+    '''The CUDA source of the kernel that adds, for the primitive pairs k0:k1
+    of the shell pairs (li, lj), V[g] += sum_e H[e] [e|0]_g: the potential at
+    the grid points of the density whose pair blocks, folded with the
+    horizontal recurrence, are H (hd, a row per shell pair; prim_pair gives
+    the shell pair of a primitive pair).
+
+    A thread takes a grid point and a slice of the primitive pairs (blockIdx.y
+    of gridDim.y): V is [gridDim.y, ld].
+    '''
+    assert li >= lj
+    L = li + lj
+    vrr, targets, names = _gen_vrr(L, li, accumulate=False)
+    ne = len(targets)
+    boys = _grid_boys(L, gauss, dtype, 'q[4]')
+    geom = ['const REAL pax = q[5], pay = q[6], paz = q[7];'] if L > 0 else []
+    terms = ['h[%d] * %s' % (n, name) for n, name in enumerate(names)]
+    acc = ['acc += %s;' % ' + '.join(terms)]
+    point = ['const REAL zeta = gexp[g], omega = gexp[(size_t)ld + g];'] if gauss else []
+
+    def ind(lines, n):
+        return '\n'.join(' ' * n + x for x in lines)
+
+    return '''
+extern "C" __global__
+void %(name)s(REAL* __restrict__ V, const REAL* __restrict__ grid, const REAL* __restrict__ gexp,
+        const REAL* __restrict__ prims, const int* __restrict__ prim_pair,
+        const REAL* __restrict__ hd, const REAL* __restrict__ boys,
+        const int k0, const int k1, const int ngrids, const int ld)
+{
+    const int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= ngrids) {
+        return;
+    }
+    const int ks = k0 + (int)(((long long)(k1 - k0) * blockIdx.y) / gridDim.y);
+    const int ke = k0 + (int)(((long long)(k1 - k0) * (blockIdx.y + 1)) / gridDim.y);
+    const REAL gx = grid[g], gy = grid[(size_t)ld + g], gz = grid[(size_t)2*ld + g];
+%(point)s
+    REAL acc = 0;
+    for (int k = ks; k < ke; ++k) {
+        const REAL* __restrict__ q = prims + %(nrec)d * (size_t)k;
+        const REAL* __restrict__ h = hd + %(ne)d * (size_t)prim_pair[k];
+        const REAL p = q[0];
+        const REAL cpx = gx - q[1], cpy = gy - q[2], cpz = gz - q[3];
+        const REAL T = p * (cpx*cpx + cpy*cpy + cpz*cpz);
+%(boys)s
+%(geom)s
+%(vrr)s
+%(acc)s
+    }
+    V[(size_t)blockIdx.y * ld + g] += acc;
+}
+''' % dict(name=grid_kernel_name('v', li, lj, gauss, dtype), nrec=NREC, ne=ne,
+           point=ind(point, 4), boys=ind(boys, 8), geom=ind(geom, 8), vrr=ind(vrr, 8),
+           acc=ind(acc, 8))
+
+def moment_kernel_source(li, lj, gauss=False, dtype='double'):
+    '''The CUDA source of the kernel that adds, for each primitive pair of the
+    shell pairs (li, lj), M[e] += sum_g c_g [e|0]_g over the grid points
+    g0:g1 with their charges c: what the matrix of the charges is made of,
+    after the horizontal recurrence.
+
+    A thread takes a primitive pair and a slice of the grid points (blockIdx.y
+    of gridDim.y): M is [gridDim.y, nprims, number of powers e].
+    '''
+    assert li >= lj
+    L = li + lj
+    vrr, targets, names = _gen_vrr(L, li, accumulate=False)
+    ne = len(targets)
+    # the factors n/(2p) of the recurrence are the primitive pair's: before the loop
+    consts = [x.replace('q[8]', 'oo2p') for x in vrr if x.startswith('const REAL c') and 'q[8]' in x]
+    vrr = [x for x in vrr if not (x.startswith('const REAL c') and 'q[8]' in x)]
+    assert not any('q[' in x for x in vrr)
+    boys = _grid_boys(L, gauss, dtype, 'c0 * charges[g]')
+    geom = ['const REAL pax = q[5], pay = q[6], paz = q[7], oo2p = q[8];'] if L > 0 else []
+    zero = ['REAL %s;' % ', '.join('E%d = 0' % n for n in range(ne))]
+    acc = ['E%d += %s;' % (n, name) for n, name in enumerate(names)]
+    store = ['m[%d] += E%d;' % (n, n) for n in range(ne)]
+    point = ['const REAL zeta = gexp[g], omega = gexp[(size_t)ld + g];'] if gauss else []
+
+    def ind(lines, n):
+        return '\n'.join(' ' * n + x for x in lines)
+
+    return '''
+extern "C" __global__
+void %(name)s(REAL* __restrict__ M, const REAL* __restrict__ grid, const REAL* __restrict__ gexp,
+        const REAL* __restrict__ charges, const REAL* __restrict__ prims,
+        const REAL* __restrict__ boys,
+        const int nprims, const int g0, const int g1, const int ld)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= nprims) {
+        return;
+    }
+    const int gs = g0 + (int)(((long long)(g1 - g0) * blockIdx.y) / gridDim.y);
+    const int ge = g0 + (int)(((long long)(g1 - g0) * (blockIdx.y + 1)) / gridDim.y);
+    const REAL* __restrict__ q = prims + %(nrec)d * (size_t)k;
+    const REAL p = q[0], px = q[1], py = q[2], pz = q[3], c0 = q[4];
+%(geom)s
+%(consts)s
+%(zero)s
+    for (int g = gs; g < ge; ++g) {
+        const REAL cpx = grid[g] - px, cpy = grid[(size_t)ld + g] - py, cpz = grid[(size_t)2*ld + g] - pz;
+        const REAL T = p * (cpx*cpx + cpy*cpy + cpz*cpz);
+%(point)s
+%(boys)s
+%(vrr)s
+%(acc)s
+    }
+    REAL* __restrict__ m = M + ((size_t)blockIdx.y * nprims + k) * %(ne)d;
+%(store)s
+}
+''' % dict(name=grid_kernel_name('m', li, lj, gauss, dtype), nrec=NREC, ne=ne,
+           geom=ind(geom, 4), consts=ind(consts, 4), zero=ind(zero, 4), point=ind(point, 8),
+           boys=ind(boys, 8), vrr=ind(vrr, 8), acc=ind(acc, 8), store=ind(store, 4))
+
+
 _kernels = {}
+def get_grid_kernel(kind, li, lj, gauss=False, dtype='double'):
+    '''The compiled kernel of a J-type contraction: kind 'v' for the potential
+    of a density (potential_kernel_source), 'm' for the moments of charges
+    (moment_kernel_source)'''
+    key = (kind, li, lj, gauss, dtype)
+    if key not in _kernels:
+        if max(li, lj) > LMAX:
+            raise NotImplementedError('angular momentum %d' % max(li, lj))
+        source = {'v': potential_kernel_source, 'm': moment_kernel_source}[kind]
+        code = '#define REAL %s\n' % dtype + source(li, lj, gauss, dtype)
+        _kernels[key] = cp.RawKernel(code, grid_kernel_name(kind, li, lj, gauss, dtype),
+                                     options=('-std=c++17',))
+    return _kernels[key]
+
 def get_kernel(li, lj, mode='full', dtype='double'):
     '''The compiled kernel (cupy.RawKernel) of a class of shell pairs'''
     key = (li, lj, mode, dtype)
