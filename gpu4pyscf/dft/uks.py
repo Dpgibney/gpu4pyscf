@@ -101,6 +101,12 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
         vhf = vj - vk
         if vj_last is not None:
             vhf += asarray(vhf_last.vj)
+            # the exchange part of vhf, kept apart (see rks.get_veff)
+            vk_last = getattr(vhf_last, 'vk', None)
+            if vk_last is None:
+                vk = None
+            else:
+                vk += asarray(vk_last)
         vxc += vhf
         exc += float(cupy.einsum('nij,nji->', dm_orig, vhf).real.get()) * .5
         if ecoul is not None:
@@ -111,7 +117,7 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
             vhf += asarray(vhf_last.vj)
         vxc += vhf
     t0 = log.timer('veff', *t0)
-    vxc = tag_array(vxc, ecoul=ecoul, exc=exc, vj=vhf)
+    vxc = tag_array(vxc, ecoul=ecoul, exc=exc, vj=vhf, vk=vk)
     return vxc
 
 

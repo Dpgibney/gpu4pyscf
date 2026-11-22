@@ -62,7 +62,8 @@ CASES = {
 
 @pytest.mark.parametrize('case', CASES)
 def test_two_level_energy(case):
-    # the two-level solution is the model's own
+    # the two-level solution is the model's own; here with the cheap model
+    # that builds the model's J and K (the seminumerical K: SGX_CASES below)
     charge, spin, method = CASES[case]
     mol = _mol(charge, spin)
     e = []
@@ -70,6 +71,7 @@ def test_two_level_energy(case):
         mf = method(mol)
         mf.conv_tol = 1e-10
         mf.two_level = on
+        mf.two_level_sgx_level = None
         e.append(mf.kernel())
         assert mf.converged
     assert abs(e[1] - e[0]) < 2e-9
@@ -143,3 +145,109 @@ def test_diis_history_with_shifted_fock():
     f1 = d1.update(s, ds[3], fs[3] + delta)
     f2 = d2.update(s, ds[3], fs[3] + delta)
     assert abs(f1 - f2).max() < 1e-9
+
+# The cheap model with a seminumerical K (two_level_sgx_level): the model's own
+# K is built at the references only
+SGX_CASES = ['rks_b3lyp', 'rks_wb97x', 'rks_wb97mv', 'uks_b3lyp', 'uks_wb97mv',
+             'rks_wb97mv_smd', 'uks_b3lyp_smd', 'rks_b3lyp_cpcm',
+             'rks_b3lyp_level_shift']
+_plain = {}
+
+def _plain_energy(case):
+    if case not in _plain:
+        charge, spin, method = CASES[case]
+        mf = method(_mol(charge, spin))
+        mf.conv_tol = 1e-10
+        _plain[case] = mf.kernel()
+        assert mf.converged
+    return _plain[case]
+
+@pytest.mark.parametrize('dtype', ['double', 'float'])
+@pytest.mark.parametrize('case', SGX_CASES)
+def test_two_level_sgx_energy(case, dtype):
+    charge, spin, method = CASES[case]
+    mf = method(_mol(charge, spin))
+    mf.conv_tol = 1e-10
+    mf.two_level = True
+    mf.two_level_sgx_level = 1
+    mf.two_level_sgx_dtype = dtype
+    e = mf.kernel()
+    assert mf.converged
+    assert abs(e - _plain_energy(case)) < 2e-9
+    assert mf.cycles <= 3
+
+def test_two_level_sgx_models():
+    from gpu4pyscf.sgx.sgx import _COSX
+    mol = _mol(0, 0)
+    def cheap(mf):
+        mf.two_level_sgx_level = 1
+        return two_level.cheap_scf(mf)
+    # a hybrid with the K of the four-center integrals: also with a fitted J
+    assert isinstance(cheap(dft.RKS(mol, xc='b3lyp')), _COSX)
+    assert isinstance(cheap(dft.RKS(mol, xc='b3lyp').density_fit(only_dfj=True)), _COSX)
+    # no K, or a fitted one
+    assert not isinstance(cheap(dft.RKS(mol, xc='pbe')), _COSX)
+    assert not isinstance(cheap(dft.RKS(mol, xc='b3lyp').density_fit()), _COSX)
+    # the grids of the model are at the cheap model's levels: K alone
+    mf = dft.RKS(mol, xc='b3lyp')
+    mf.grids.level = 1
+    assert isinstance(cheap(mf), _COSX)
+    mf.two_level_sgx_level = None
+    assert two_level.cheap_scf(mf) is None
+
+def test_two_level_sgx_dfj():
+    mol = _mol(0, 0)
+    e = []
+    for on in (False, True):
+        mf = dft.RKS(mol, xc='b3lyp').density_fit(only_dfj=True)
+        mf.conv_tol = 1e-10
+        mf.two_level = on
+        mf.two_level_sgx_level = 1
+        e.append(mf.kernel())
+        assert mf.converged
+    assert abs(e[1] - e[0]) < 2e-9
+
+def test_two_level_sgx_gradient():
+    mol = _mol(0, 0)
+    g = []
+    for on in (False, True):
+        mf = _smd(dft.RKS(mol, xc='wb97x'))
+        mf.conv_tol = 1e-10
+        mf.two_level = on
+        mf.two_level_sgx_level = 1
+        mf.kernel()
+        g.append(mf.Gradients().kernel())
+    assert abs(g[1] - g[0]).max() < 1e-6
+
+# A fitted J in the cheap model (two_level_auxbasis): the model's own J is
+# built at the references only
+@pytest.mark.parametrize('case,sgx_level', [
+    ('rks_pbe', None), ('uks_pbe', None), ('rks_b3lyp', None), ('rks_b3lyp', 1),
+    ('rks_wb97mv', 1), ('uks_wb97mv', 1), ('rks_wb97mv_smd', 1)])
+def test_two_level_fitted_j(case, sgx_level):
+    charge, spin, method = CASES[case]
+    mf = method(_mol(charge, spin))
+    mf.conv_tol = 1e-10
+    mf.two_level = True
+    mf.two_level_auxbasis = 'def2-universal-jfit'
+    mf.two_level_sgx_level = sgx_level
+    mf.two_level_sgx_dtype = 'float'
+    cheap = two_level.cheap_scf(mf)
+    assert isinstance(cheap, two_level._FittedJ)
+    e = mf.kernel()
+    assert mf.converged
+    assert abs(e - _plain_energy(case)) < 2e-9
+    assert mf.cycles <= 3
+
+def test_two_level_fitted_j_models():
+    mol = _mol(0, 0)
+    # the fitted J of the model itself is not replaced
+    mf = dft.RKS(mol, xc='pbe').density_fit()
+    mf.two_level_auxbasis = 'def2-universal-jfit'
+    assert not isinstance(two_level.cheap_scf(mf), two_level._FittedJ)
+    # a model on the cheap model's grids: J alone
+    mf = dft.RKS(mol, xc='pbe')
+    mf.grids.level = 1
+    assert two_level.cheap_scf(mf) is None
+    mf.two_level_auxbasis = 'def2-universal-jfit'
+    assert isinstance(two_level.cheap_scf(mf), two_level._FittedJ)

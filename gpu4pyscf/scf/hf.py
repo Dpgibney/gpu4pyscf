@@ -1020,6 +1020,18 @@ class SCF(pyscf_lib.StreamObject):
     two_level_nlcgrids_level = getattr(__config__, 'scf_hf_SCF_two_level_nlcgrids_level', 0)
     two_level_conv_tol       = getattr(__config__, 'scf_hf_SCF_two_level_conv_tol', 1e-5)
     two_level_micro_cycles   = 20
+    # The exchange of that copy, for a hybrid whose K is the exact one: the
+    # seminumerical K (gpu4pyscf.sgx) on the SGX grid of this level, with kernels
+    # in two_level_sgx_dtype ('float' or 'double'); each evaluation of the model
+    # then builds its own K. None: the copy builds the model's K in every cycle.
+    two_level_sgx_level      = getattr(__config__, 'scf_hf_SCF_two_level_sgx_level', 1)
+    two_level_sgx_dtype      = getattr(__config__, 'scf_hf_SCF_two_level_sgx_dtype', 'float')
+    # The J of that copy, where the model's J is the exact one: an auxiliary basis
+    # for a fitted J without a stored tensor ('aug_etb' for PySCF's even-tempered
+    # basis of the molecule: the fit has to be that good, def2-universal-jfit
+    # costs an evaluation of the model more); each evaluation of the model then
+    # builds its own J. None: the copy builds the model's J in every cycle.
+    two_level_auxbasis       = getattr(__config__, 'scf_hf_SCF_two_level_auxbasis', None)
     conv_check          = hf_cpu.SCF.conv_check
     callback            = hf_cpu.SCF.callback
 
@@ -1029,7 +1041,8 @@ class SCF(pyscf_lib.StreamObject):
         'diis_file', 'diis_space_rollback', 'damp', 'level_shift',
         'direct_scf', 'direct_scf_tol', 'jk_one_pass', 'conv_check', 'callback',
         'two_level', 'two_level_scf', 'two_level_grids_level', 'two_level_nlcgrids_level',
-        'two_level_conv_tol', 'two_level_micro_cycles',
+        'two_level_conv_tol', 'two_level_micro_cycles', 'two_level_sgx_level',
+        'two_level_sgx_dtype', 'two_level_auxbasis',
         'mol', 'chkfile', 'mo_energy', 'mo_coeff', 'mo_occ',
         'e_tot', 'converged', 'cycles', 'scf_summary',
         'disp', 'disp_with_3body',
@@ -1142,6 +1155,10 @@ class SCF(pyscf_lib.StreamObject):
             log.info('jk_one_pass = %s', self.jk_one_pass)
         if self.two_level:
             log.info('two_level = %s', self.two_level)
+            log.info('two_level_sgx_level = %s  two_level_sgx_dtype = %s  two_level_auxbasis = %s',
+                     self.two_level_sgx_level, self.two_level_sgx_dtype,
+                     self.two_level_auxbasis if isinstance(self.two_level_auxbasis, (str, type(None)))
+                     else 'a basis')
         if self.chkfile:
             log.info('chkfile to save SCF result = %s', self.chkfile)
         return self
