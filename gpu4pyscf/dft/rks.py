@@ -87,6 +87,10 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
 
     if mol is None: mol = ks.mol
     if dm is None: dm = ks.make_rdm1()
+    # The density that vhf_last was built from: its J and K are in vhf_last,
+    # only the XC terms are evaluated (on the grids of ks, which may be other
+    # grids than those of vhf_last: scf.two_level)
+    unchanged = dm_last is dm and getattr(vhf_last, 'vj', None) is not None
     log = logger.new_logger(ks)
     t0 = log.init_timer()
     initialize_grids(ks, mol, dm)
@@ -120,7 +124,11 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
     if hybrid:
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(ks.xc, spin=mol.spin)
     vk = None
-    if hybrid and ks.jk_one_pass and omega == 0:
+    if unchanged:
+        vj = cupy.zeros_like(dm)
+        if hybrid:
+            vk = cupy.zeros_like(dm)
+    elif hybrid and ks.jk_one_pass and omega == 0:
         # J and K in one Rys pass, see hf.get_veff. jk.get_jk has no such pass for range-separated K.
         vj, vk = ks.get_jk(mol, dm, hermi)
         vk *= hyb
