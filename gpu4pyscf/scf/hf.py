@@ -391,12 +391,17 @@ def scf(mf, dm0=None, **kwargs):
         # Initial guess from existing wavefunction
         dm0 = mf.make_rdm1()
 
+    scf_kernel = _kernel
+    if getattr(mf, 'two_level', False):
+        from gpu4pyscf.scf import two_level
+        scf_kernel = two_level.kernel
+
     if mf.max_cycle > 0 or mf.mo_coeff is None:
         mf.converged, mf.e_tot, \
                 mf.mo_energy, mf.mo_coeff, mf.mo_occ = \
-                _kernel(mf, mf.conv_tol, mf.conv_tol_grad,
-                        dm0=dm0, callback=mf.callback,
-                        conv_check=mf.conv_check, **kwargs)
+                scf_kernel(mf, mf.conv_tol, mf.conv_tol_grad,
+                           dm0=dm0, callback=mf.callback,
+                           conv_check=mf.conv_check, **kwargs)
     else:
         # Avoid to update SCF orbitals in the non-SCF initialization
         # (issue #495).  But run regular SCF for initial guess if SCF was
@@ -1003,6 +1008,18 @@ class SCF(pyscf_lib.StreamObject):
     # Rys pass. Exact. Faster where the K-only pass's exchange screening gains little (small and medium
     # molecules); off by default.
     jk_one_pass         = getattr(__config__, 'scf_hf_SCF_jk_one_pass', False)
+    # Two-level SCF (scf.two_level), for DFT: the solution of this model from a
+    # few evaluations of its XC and VV10 terms on its own grids, the iterations
+    # between them on a copy with the grids of levels two_level_grids_level and
+    # two_level_nlcgrids_level (or on two_level_scf if set), which is first
+    # converged to two_level_conv_tol. The solution is this model's own, to its
+    # convergence thresholds; off by default.
+    two_level           = getattr(__config__, 'scf_hf_SCF_two_level', False)
+    two_level_scf       = None
+    two_level_grids_level    = getattr(__config__, 'scf_hf_SCF_two_level_grids_level', 1)
+    two_level_nlcgrids_level = getattr(__config__, 'scf_hf_SCF_two_level_nlcgrids_level', 0)
+    two_level_conv_tol       = getattr(__config__, 'scf_hf_SCF_two_level_conv_tol', 1e-5)
+    two_level_micro_cycles   = 20
     conv_check          = hf_cpu.SCF.conv_check
     callback            = hf_cpu.SCF.callback
 
@@ -1011,6 +1028,8 @@ class SCF(pyscf_lib.StreamObject):
         'sap_basis', 'DIIS', 'diis', 'diis_space', 'diis_damp', 'diis_start_cycle',
         'diis_file', 'diis_space_rollback', 'damp', 'level_shift',
         'direct_scf', 'direct_scf_tol', 'jk_one_pass', 'conv_check', 'callback',
+        'two_level', 'two_level_scf', 'two_level_grids_level', 'two_level_nlcgrids_level',
+        'two_level_conv_tol', 'two_level_micro_cycles',
         'mol', 'chkfile', 'mo_energy', 'mo_coeff', 'mo_occ',
         'e_tot', 'converged', 'cycles', 'scf_summary',
         'disp', 'disp_with_3body',
@@ -1121,6 +1140,8 @@ class SCF(pyscf_lib.StreamObject):
             log.info('direct_scf_tol = %g', self.direct_scf_tol)
         if self.jk_one_pass:
             log.info('jk_one_pass = %s', self.jk_one_pass)
+        if self.two_level:
+            log.info('two_level = %s', self.two_level)
         if self.chkfile:
             log.info('chkfile to save SCF result = %s', self.chkfile)
         return self

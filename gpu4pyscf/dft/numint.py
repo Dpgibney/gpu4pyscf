@@ -370,7 +370,27 @@ def eval_rho4(mol, ao, mo0, mo1, non0tab=None, xctype='LDA', hermi=0,
     t0 = log.timer_debug2('contract rho', *t0)
     return rho
 
-def _vv10nlc(rho_drho, coords, weights, nlc_pars):
+def _vv10nlc(rho_drho, coords, weights, nlc_pars, memo=None):
+    '''VV10 energy density and potential (v_rho, v_gamma) on the grid.
+
+    memo, when given, is an object that keeps the last result in its
+    attribute _vv10nlc_last (the NumInt object of a calculation). A call with
+    the same arrays of points and weights, the same parameters and the same
+    density returns that result instead of evaluating the sums over all pairs
+    of points again: the nuclear gradient asks for the potential of the
+    converged density on the SCF's own grid, which the last SCF cycle has
+    evaluated.
+    '''
+    if memo is not None:
+        last = getattr(memo, '_vv10nlc_last', None)
+        if (last is not None
+                and last['coords'] is coords and last['weights'] is weights
+                and last['nlc_pars'] == tuple(nlc_pars)
+                and last['rho'].shape == rho_drho.shape
+                and bool(cupy.array_equal(last['rho'], rho_drho))):
+            return last['exc'].copy(), last['vxc'].copy()
+        coords_in, weights_in = coords, weights
+
     kappa_prefactor = nlc_pars[0] * 1.5 * np.pi * (9 * np.pi)**(-1.0/6.0)
     C_in_omega = nlc_pars[1]
     beta = 0.03125 * (3.0 / nlc_pars[0]**2)**0.75
@@ -443,6 +463,10 @@ def _vv10nlc(rho_drho, coords, weights, nlc_pars):
     exc[rho_nonzero_mask] = beta + 0.5 * E_i
     vxc[0, rho_nonzero_mask] = beta + E_i + rho_i * (dkappa_drho_i * U_i + domega_drho_i * W_i)
     vxc[1, rho_nonzero_mask] = rho_i * domega_dgamma_i * W_i
+    if memo is not None:
+        memo._vv10nlc_last = {
+            'coords': coords_in, 'weights': weights_in, 'nlc_pars': tuple(nlc_pars),
+            'rho': rho_drho.copy(), 'exc': exc.copy(), 'vxc': vxc.copy()}
     return exc, vxc
 
 def gen_grid_range(ngrids, device_id, blksize=MIN_BLK_SIZE):
@@ -1728,7 +1752,7 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
     vxc = 0
     nlc_coefs = ni.nlc_coeff(xc_code)
     for nlc_pars, fac in nlc_coefs:
-        e, v = _vv10nlc(rho, grids.coords, grids.weights, nlc_pars)
+        e, v = _vv10nlc(rho, grids.coords, grids.weights, nlc_pars, memo=ni)
         exc += e * fac
         vxc += v * fac
     t1 = log.timer_debug1('eval vv on grids', *t1)
@@ -2221,9 +2245,11 @@ class NumInt(lib.StreamObject, LibXCMixin):
     pair_mask    = None
     screen_index = None
     xcfuns       = None        # can be multiple xc functionals
+    # The last VV10 evaluation on a grid (_vv10nlc): 7 numbers per point
+    _vv10nlc_last = None
 
     __getstate__, __setstate__ = lib.generate_pickle_methods(
-        excludes=('gdftopt',))
+        excludes=('gdftopt', '_vv10nlc_last'))
 
     def build(self, mol, coords):
         self.gdftopt = _GDFTOpt.from_mol(mol)
@@ -2264,6 +2290,7 @@ class NumInt(lib.StreamObject, LibXCMixin):
         self.xcfuns       = None
         self.grid_blksize = None
         self.non0ao_idx = {}
+        self._vv10nlc_last = None
         return self
 
     def eval_xc_eff(self, xc_code, rho, deriv=1, *, omega=None, xctype=None,

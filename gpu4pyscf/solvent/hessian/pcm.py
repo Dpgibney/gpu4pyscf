@@ -23,7 +23,7 @@ import ctypes
 from cupyx.scipy.special import erf
 from pyscf import lib, gto
 from gpu4pyscf import scf
-from gpu4pyscf.solvent.pcm import PI, switch_h, libsolvent, natm_without_ghost
+from gpu4pyscf.solvent.pcm import PI, switch_h, libsolvent, natm_without_ghost, has_intermediates_for
 from gpu4pyscf.solvent.grad.pcm import grad_qv, get_dD_dS, get_dF_dA, get_dSii, grad_switch_h
 from gpu4pyscf.solvent.grad.pcm import left_multiply_dS_offdiagonal
 from gpu4pyscf.lib import logger
@@ -372,10 +372,7 @@ def analytical_hess_nuc(pcmobj, dm, verbose=None):
     if (not pcmobj._intermediates or
         not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
         pcmobj.build()
-    dm_cache = pcmobj._intermediates.get('dm', None)
-    if dm_cache is not None and cupy.linalg.norm(dm_cache - dm) < 1e-10:
-        pass
-    else:
+    if not has_intermediates_for(pcmobj, dm):
         pcmobj._get_vind(dm)
     mol = pcmobj.mol
     log = logger.new_logger(pcmobj, verbose)
@@ -463,10 +460,7 @@ def analytical_hess_qv(pcmobj, dm, verbose=None):
     if (not pcmobj._intermediates or
         not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
         pcmobj.build()
-    dm_cache = pcmobj._intermediates.get('dm', None)
-    if dm_cache is not None and cupy.linalg.norm(dm_cache - dm) < 1e-10:
-        pass
-    else:
+    if not has_intermediates_for(pcmobj, dm):
         pcmobj._get_vind(dm)
     mol = pcmobj.mol
     log = logger.new_logger(pcmobj, verbose)
@@ -670,10 +664,7 @@ def analytical_hess_solver(pcmobj, dm, verbose=None):
     if (not pcmobj._intermediates or
         not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
         pcmobj.build()
-    dm_cache = pcmobj._intermediates.get('dm', None)
-    if dm_cache is not None and cupy.linalg.norm(dm_cache - dm) < 1e-10:
-        pass
-    else:
+    if not has_intermediates_for(pcmobj, dm):
         pcmobj._get_vind(dm)
     mol = pcmobj.mol
     log = logger.new_logger(mol, verbose)
@@ -1211,10 +1202,7 @@ def analytical_grad_vmat(pcmobj, dm, mo_coeff, mo_occ, atmlst=None, verbose=None
     if (not pcmobj._intermediates or
         not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
         pcmobj.build()
-    dm_cache = pcmobj._intermediates.get('dm', None)
-    if dm_cache is not None and cupy.linalg.norm(dm_cache - dm) < 1e-10:
-        pass
-    else:
+    if not has_intermediates_for(pcmobj, dm):
         pcmobj._get_vind(dm)
     mol = pcmobj.mol
     log = logger.new_logger(pcmobj, verbose)

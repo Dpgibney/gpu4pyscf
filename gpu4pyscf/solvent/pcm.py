@@ -474,6 +474,85 @@ def from_cpu(method):
     out.eps_optical = getattr(method, 'eps_optical', None)
     return out
 
+class _Intermediates(dict):
+    '''What a PCM object keeps between calls. The dense matrices D and S of
+    IEF-PCM, SS(V)PE and SMD (n^2 numbers each for n surface points) are not
+    among it once K is factorized: the SCF and the nuclear gradient apply D and
+    S to vectors straight from the surface data. Code that reads self['D'] or
+    self['S'] (the Hessian, the TDDFT A and B matrices, the response to many
+    densities at once) has both built at that point; they then stay.
+    '''
+    surface = None
+
+    def __missing__(self, key):
+        if key in ('D', 'S') and self.surface is not None:
+            self['D'], self['S'] = get_D_S(self.surface, with_S=True, with_D=True)
+            return self[key]
+        raise KeyError(key)
+
+def _factorized_K(surface, method, f_epsilon):
+    '''The LU factors of the matrix K of a PCM model (J. Chem. Phys. 133,
+    244111 (2010)), their pivots, and the vector A (None for C-PCM and COSMO).
+    D and S are released as K is assembled: three n x n arrays exist at most
+    at a time, and the factors alone remain.
+    '''
+    method = method.upper()
+    A = None
+    if method in ('C-PCM', 'CPCM', 'COSMO'):
+        _, K = get_D_S(surface, with_S = True, with_D = False)
+    elif method in ('IEF-PCM', 'IEFPCM', 'SMD'):
+        _, A = get_F_A(surface)
+        D, S = get_D_S(surface, with_S = True, with_D = True)
+        D *= A
+        K = cupy.dot(D, S)
+        D = None
+        # K = S - f_epsilon/(2.0*PI) * DAS
+        K *= -(f_epsilon/(2.0*PI))
+        K += S
+        S = None
+    elif method == 'SS(V)PE':
+        _, A = get_F_A(surface)
+        D, S = get_D_S(surface, with_S = True, with_D = True)
+        D *= A
+        DAS = cupy.dot(D, S)
+        D = None
+        # K = S - f_epsilon/(4.0*PI) * (DAS + DAS.T)
+        K = DAS + DAS.T
+        DAS = None
+        K *= -(f_epsilon/(4.0*PI))
+        K += S
+        S = None
+    else:
+        raise RuntimeError(f"Unknown implicit solvent model: {method}")
+    # Warning: lu_factor function requires a work space of the same size as K
+    K_LU, K_LU_pivot = lu_factor(K, overwrite_a = True, check_finite = False)
+    return K_LU, K_LU_pivot, A
+
+def _total_density(dms):
+    '''The density matrix that the charges of PCM._get_vind describe: the sum
+    of the two spin densities, or the first of a stack. A copy without tags,
+    kept next to those charges as the key of what they belong to.
+    '''
+    dms = cupy.asarray(dms)
+    nao = dms.shape[-1]
+    dms = dms.reshape(-1,nao,nao).view(cupy.ndarray)
+    if dms.shape[0] == 2:
+        return dms[0] + dms[1]
+    return dms[0].copy()
+
+def has_intermediates_for(pcmobj, dm):
+    '''Whether the surface charges and potentials that pcmobj keeps (q, q_sym
+    and v_grids of its last _get_vind call) belong to the density matrix dm.
+    '''
+    intermediates = pcmobj._intermediates
+    dm_cache = intermediates.get('dm', None) if intermediates else None
+    if dm_cache is None:
+        return False
+    dm = cupy.asarray(dm)
+    if dm.shape != dm_cache.shape:
+        return False
+    return float(cupy.linalg.norm(dm_cache - dm)) < 1e-10
+
 class PCM(lib.StreamObject):
     '''PCM with optional dielectric overrides.
 
@@ -590,7 +669,7 @@ class PCM(lib.StreamObject):
 
         self.surface = gen_surface(mol, rad=self.radii_table, ng=ng,
                                    surface_discretization_method = self.surface_discretization_method)
-        self._intermediates = {}
+        self._intermediates = _Intermediates()
 
         epsilon = self.get_eps()
         inf = float('inf')
@@ -606,48 +685,21 @@ class PCM(lib.StreamObject):
             raise RuntimeError(f"Unknown implicit solvent model: {self.method}")
 
         if not getattr(self, "lowmem_intermediate_storage", False):
-            if self.method.upper() in ['C-PCM', 'CPCM', 'COSMO']:
-                _, S = get_D_S(self.surface, with_S = True, with_D = False)
-                K = S
-                S = None
-                # R = -f_epsilon * cupy.eye(K.shape[0])
-            elif self.method.upper() in ['IEF-PCM', 'IEFPCM']:
-                _, A = get_F_A(self.surface)
-                D, S = get_D_S(self.surface, with_S = True, with_D = True)
-                DA = D*A
-                DAS = cupy.dot(DA, S)
-                K = S - f_epsilon/(2.0*PI) * DAS
-                # R = -f_epsilon * (cupy.eye(K.shape[0]) - 1.0/(2.0*PI)*DA)
-            elif self.method.upper() == 'SS(V)PE':
-                _, A = get_F_A(self.surface)
-                D, S = get_D_S(self.surface, with_S = True, with_D = True)
-                DA = D*A
-                DAS = cupy.dot(DA, S)
-                K = S - f_epsilon/(4.0*PI) * (DAS + DAS.T)
-                # R = -f_epsilon * (cupy.eye(K.shape[0]) - 1.0/(2.0*PI)*DA)
-            else:
-                raise RuntimeError(f"Unknown implicit solvent model: {self.method}")
-
-            # Warning: lu_factor function requires a work space of the same size as K
-            K_LU, K_LU_pivot = lu_factor(K, overwrite_a = True, check_finite = False)
-            K = None
-
-            if self.if_method_in_CPCM_category:
-                intermediates = {
-                    'K_LU': cupy.asarray(K_LU),
-                    'K_LU_pivot': cupy.asarray(K_LU_pivot),
-                    'f_epsilon': f_epsilon,
-                }
-            else:
-                intermediates = {
-                    'S': cupy.asarray(S),
-                    'D': cupy.asarray(D),
-                    'A': cupy.asarray(A),
-                    'K_LU': cupy.asarray(K_LU),
-                    'K_LU_pivot': cupy.asarray(K_LU_pivot),
-                    'f_epsilon': f_epsilon,
-                }
-            self._intermediates.update(intermediates)
+            # K = S                                      for C-PCM and COSMO,
+            #     S - f_epsilon/(2.0*PI) * D A S         for IEF-PCM,
+            #     S - f_epsilon/(4.0*PI) * (DAS + DAS.T) for SS(V)PE
+            # R = -f_epsilon                                         for C-PCM and COSMO,
+            #     -f_epsilon * (cupy.eye(K.shape[0]) - 1.0/(2.0*PI)*DA) otherwise
+            K_LU, K_LU_pivot, A = _factorized_K(self.surface, self.method, f_epsilon)
+            self._intermediates.update({
+                'K_LU': cupy.asarray(K_LU),
+                'K_LU_pivot': cupy.asarray(K_LU_pivot),
+                'f_epsilon': f_epsilon,
+            })
+            if A is not None:
+                self._intermediates['A'] = cupy.asarray(A)
+            # D and S on demand (_Intermediates)
+            self._intermediates.surface = self.surface
 
         else:
             self._intermediates['f_epsilon'] = f_epsilon
@@ -688,6 +740,12 @@ class PCM(lib.StreamObject):
             not any(isinstance(x, cupy.ndarray) for x in self._intermediates.values())):
             self.build()
         assert dms is not None
+        if (self.frozen_dm0_for_finite_difference_without_response is None
+                and self._intermediates.get('vmat') is not None
+                and has_intermediates_for(self, _total_density(dms))):
+            # the density of the last call (a reference of scf.two_level
+            # evaluates the potential of the density of the cycle before it)
+            return self._intermediates['epcm'], self._intermediates['vmat'].copy()
         v_left = self._get_vgrids(dms, with_nuc = True)
         v_right = v_left
 
@@ -727,6 +785,18 @@ class PCM(lib.StreamObject):
         self._intermediates['q'] = q[0]
         self._intermediates['q_sym'] = q_sym[0]
         self._intermediates['v_grids'] = v_right[0]
+        # The density these charges and potentials belong to. The gradient and
+        # Hessian functions compare their density with it and, when it is the
+        # same (the last SCF cycle evaluated the converged density), take q,
+        # q_sym and v_grids from here instead of evaluating them again; so does
+        # this function for its energy and potential.
+        if self.frozen_dm0_for_finite_difference_without_response is None:
+            self._intermediates['dm'] = _total_density(dms)
+            self._intermediates['epcm'] = epcm
+            self._intermediates['vmat'] = vmat[0].copy()
+        else:
+            for key in ('dm', 'epcm', 'vmat'):
+                self._intermediates.pop(key, None)
         return epcm, vmat[0]
 
     def _get_qsym(self, dms, with_nuc = False):
@@ -848,24 +918,28 @@ class PCM(lib.StreamObject):
         if self.if_method_in_CPCM_category:
             # R = -f_epsilon * cupy.eye(K.shape[0])
             return -f_epsilon * right_vector
-        else:
-            # R = -f_epsilon * (cupy.eye(K.shape[0]) - 1.0/(2.0*PI)*DA)
-            if not getattr(self, "lowmem_intermediate_storage", False):
-                A = self._intermediates['A']
-                D = self._intermediates['D']
-                DA = D*A
-                if R_transpose:
-                    DA = DA.T
-                return -f_epsilon * (right_vector - 1.0/(2.0*PI) * cupy.dot(DA, right_vector))
+        # R = -f_epsilon * (cupy.eye(K.shape[0]) - 1.0/(2.0*PI)*DA)
+        A = self._intermediates['A']
+        lowmem = getattr(self, "lowmem_intermediate_storage", False)
+        one_vector = right_vector.size == A.size
+        if not lowmem and ('D' in self._intermediates or not one_vector):
+            # The dense D, which a Hessian or TDDFT calculation has built, or
+            # which is built here for a set of vectors
+            D = self._intermediates['D']
+            a = A if right_vector.ndim == 1 else A[:,None]
+            if R_transpose:
+                DA_v = a * cupy.dot(right_vector.T, D).T
             else:
-                A = self._intermediates['A']
-                if not R_transpose:
-                    Av = A.reshape(right_vector.shape) * right_vector # Avoid multiplying shape (n,1) and (n,) resulting (n,n)
-                    return -f_epsilon * (right_vector - 1.0/(2.0*PI) * left_multiply_D(self.surface, Av))
-                else:
-                    DT_v = left_multiply_D(self.surface, right_vector, transpose = True)
-                    ADT_v = A.reshape(right_vector.shape) * DT_v # Avoid multiplying shape (n,1) and (n,) resulting (n,n)
-                    return -f_epsilon * (right_vector - 1.0/(2.0*PI) * ADT_v)
+                DA_v = cupy.dot(D, a * right_vector)
+            return -f_epsilon * (right_vector - 1.0/(2.0*PI) * DA_v)
+        # one vector: D applied from the surface data
+        if not R_transpose:
+            Av = A.reshape(right_vector.shape) * right_vector # Avoid multiplying shape (n,1) and (n,) resulting (n,n)
+            return -f_epsilon * (right_vector - 1.0/(2.0*PI) * left_multiply_D(self.surface, Av))
+        else:
+            DT_v = left_multiply_D(self.surface, right_vector, transpose = True)
+            ADT_v = A.reshape(right_vector.shape) * DT_v # Avoid multiplying shape (n,1) and (n,) resulting (n,n)
+            return -f_epsilon * (right_vector - 1.0/(2.0*PI) * ADT_v)
 
     def left_solve_K(self, right_vector, K_transpose = False):
         ''' K^{-1} @ right_vector '''

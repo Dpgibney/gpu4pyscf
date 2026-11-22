@@ -27,6 +27,7 @@ from pyscf.grad import rhf as rhf_grad
 from pyscf.data.elements import is_ghost_atom
 from gpu4pyscf.gto import int3c1e
 from gpu4pyscf.solvent.pcm import (PI, switch_h, libsolvent, left_multiply_S, left_multiply_D,
+                                   has_intermediates_for,
                                    atom_coords_without_ghost, atom_charges_without_ghost, natm_without_ghost)
 from gpu4pyscf.gto.int3c1e_ip import int1e_grids_ip1, int1e_grids_ip2
 from gpu4pyscf.lib.cupy_helper import contract
@@ -409,10 +410,7 @@ def grad_nuc(pcmobj, dm, q_sym = None):
     if (not pcmobj._intermediates or
         not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
         pcmobj.build()
-    dm_cache = pcmobj._intermediates.get('dm', None)
-    if dm_cache is not None and cupy.linalg.norm(dm_cache - dm) < 1e-10:
-        pass
-    else:
+    if not has_intermediates_for(pcmobj, dm):
         pcmobj._get_vind(dm)
 
     mol = pcmobj.mol
@@ -450,6 +448,88 @@ def grad_nuc(pcmobj, dm, q_sym = None):
     t1 = log.timer_debug1('grad nuc', *t1)
     return de
 
+def _int3c2e_opt_for_charges(pcmobj):
+    '''The 3-center integral data of the molecule's basis with the surface
+    charges of pcmobj as auxiliary functions, one normalized s Gaussian and
+    one center each'''
+    from gpu4pyscf.df.int3c2e_bdiv import Int3c2eOpt
+    charge_exp  = pcmobj.surface['charge_exp']
+    grid_coords = pcmobj.surface['grid_coords']
+    fakemol = gto.fakemol_for_charges(grid_coords.get(), expnt=charge_exp.get()**2)
+    return Int3c2eOpt(pcmobj.mol, fakemol).build(1e-14)
+
+def _grad_qv_int3c2e(pcmobj, dm, q_sym, int3c2e_opt):
+    '''grad_qv's two terms for a symmetric density matrix from the kernel of
+    the density-fitted Coulomb gradient (sum_ejk_int3c2e_ip1), with the
+    surface charges as its auxiliary vector: sum_ij,g D_ij q_g d(ij|g)/dR for
+    the centers of the basis functions, per atom, and, by translational
+    invariance, for those of the charges, per charge. One pass of the Rys
+    3-center kernels instead of two passes of the int3c1e ones, the first of
+    which also builds a [3,nao,nao] matrix: 2.5-3 times faster for caffeine.
+    '''
+    from gpu4pyscf.df.int3c2e_bdiv import int3c2e_scheme, libvhf_rys
+    from gpu4pyscf.gto.mole import _split_l_ctr_groups
+    from gpu4pyscf.lib.cupy_helper import transpose_sum
+    mol = int3c2e_opt.mol
+    auxmol = int3c2e_opt.auxmol
+    gridslice = pcmobj.surface['gslice_by_atom']
+    ngrids = pcmobj.surface['grid_coords'].shape[0]
+
+    dm = mol.apply_C_mat_CT(cupy.asarray(dm))
+    dm = transpose_sum(dm, inplace=True)
+    dm *= .5
+    auxvec = auxmol.C_dot_mat(cupy.asarray(q_sym))
+    naux = len(auxvec)
+
+    nsp_per_block, gout_stride, shm_size = int3c2e_scheme(gout_width=54, deriv=(1,0,0))
+    lmax = mol.uniq_l_ctr[:,0].max()
+    laux = auxmol.uniq_l_ctr[:,0].max()
+    shm_size_max = shm_size[:laux+1,:lmax+1,:lmax+1].max()
+    bas_ij_idx, shl_pair_offsets = mol.aggregate_shl_pairs(
+        int3c2e_opt.bas_ij_cache, nsp_per_block[0]*16)
+    # Split the charges into small batches for load balance
+    _, aux_counts = _split_l_ctr_groups(
+        auxmol.uniq_l_ctr, auxmol.l_ctr_counts, [16]*(laux+1))
+    ksh_offsets_cpu = numpy.append(0, numpy.cumsum(aux_counts))
+    ksh_offsets_gpu = cupy.asarray(ksh_offsets_cpu+mol.nbas, dtype=numpy.int32)
+
+    int3c2e_envs = int3c2e_opt.int3c2e_envs
+    natm = pcmobj.mol.natm
+    # per atom of the basis functions, and per charge (each its own center)
+    ej = cupy.zeros((natm, 3))
+    ej_grids = cupy.zeros((ngrids, 3))
+    err = libvhf_rys.sum_ejk_int3c2e_ip1(
+        ctypes.cast(ej.data.ptr, ctypes.c_void_p),
+        ctypes.cast(ej_grids.data.ptr, ctypes.c_void_p),
+        ctypes.cast(dm.data.ptr, ctypes.c_void_p),
+        ctypes.cast(auxvec.data.ptr, ctypes.c_void_p),
+        ctypes.c_int(1),
+        ctypes.c_double(0.), ctypes.c_double(1.), ctypes.c_double(1.),
+        ctypes.byref(int3c2e_envs),
+        ctypes.c_int(int(shm_size_max)),
+        ctypes.c_int(len(shl_pair_offsets) - 1),
+        ctypes.c_int(len(ksh_offsets_cpu) - 1),
+        ctypes.cast(shl_pair_offsets.data.ptr, ctypes.c_void_p),
+        ctypes.cast(bas_ij_idx.data.ptr, ctypes.c_void_p),
+        ctypes.cast(ksh_offsets_gpu.data.ptr, ctypes.c_void_p),
+        ctypes.cast(gout_stride.data.ptr, ctypes.c_void_p),
+        pyscf_lib.c_null_ptr(),
+        ctypes.c_int(0),
+        ctypes.c_int(0), ctypes.c_int(0),
+        ctypes.c_int(naux), ctypes.c_int(natm))
+    if err != 0:
+        raise RuntimeError('sum_ejk_int3c2e_ip1 failed')
+    dq = cupy.asarray([cupy.sum(ej_grids[p0:p1], axis=0) for p0,p1 in gridslice])
+    dq = gradient_nonghost_to_all(pcmobj.mol, dq)
+    # the functions' derivatives of the kernel are those of both functions of
+    # each pair of the lower triangle, and the surface charges' potential
+    # enters the energy with the sign of the electrons' charge
+    return -2.0 * (ej + dq)
+
+def _is_symmetric(dm):
+    return (dm.ndim == 2 and dm.shape[0] == dm.shape[1]
+            and float(abs(dm - dm.T).max()) <= 1e-12 * max(1., float(abs(dm).max())))
+
 def grad_qv(pcmobj, dm, q_sym = None):
     '''
     contributions due to integrals
@@ -457,10 +537,7 @@ def grad_qv(pcmobj, dm, q_sym = None):
     if (not pcmobj._intermediates or
         not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
         pcmobj.build()
-    dm_cache = pcmobj._intermediates.get('dm', None)
-    if dm_cache is not None and cupy.linalg.norm(dm_cache - dm) < 1e-10:
-        pass
-    else:
+    if not has_intermediates_for(pcmobj, dm):
         pcmobj._get_vind(dm)
     mol = pcmobj.mol
     log = logger.new_logger(mol, mol.verbose)
@@ -471,6 +548,23 @@ def grad_qv(pcmobj, dm, q_sym = None):
     if q_sym is None:
         q_sym = pcmobj._intermediates['q_sym']
 
+    from gpu4pyscf.df.int3c2e_bdiv import LMAX
+    frozen_dm0 = pcmobj.frozen_dm0_for_finite_difference_without_response
+    dm = cupy.asarray(dm)
+    if (mol._bas[:,gto.ANG_OF].max() <= LMAX and q_sym.ndim == 1 and _is_symmetric(dm)
+            and (frozen_dm0 is None or _is_symmetric(cupy.asarray(frozen_dm0)))):
+        # One pass of the Rys 3-center kernels (symmetric densities; a
+        # density that is not symmetric takes the int3c1e kernels below, whose
+        # first term is the derivative of the bra functions alone)
+        int3c2e_opt = _int3c2e_opt_for_charges(pcmobj)
+        de = _grad_qv_int3c2e(pcmobj, dm, q_sym, int3c2e_opt)
+        if frozen_dm0 is not None:
+            # Note: The q_sym computed above actually use frozen_dm0 as input, so it's actually q_sym_right
+            q_sym_left, _ = pcmobj._get_qsym(dm, with_nuc = True)
+            de += _grad_qv_int3c2e(pcmobj, frozen_dm0, q_sym_left, int3c2e_opt)
+        t1 = log.timer_debug1('grad qv', *t1)
+        return de.get()
+
     intopt = int3c1e.VHFOpt(mol)
     intopt.build(1e-14, aosym=False)
     dvj = int1e_grids_ip1(mol, grid_coords, dm = dm, charges = q_sym,
@@ -480,8 +574,7 @@ def grad_qv(pcmobj, dm, q_sym = None):
                           direct_scf_tol = 1e-14, charge_exponents = charge_exp**2,
                           intopt=intopt)
 
-    if pcmobj.frozen_dm0_for_finite_difference_without_response is not None:
-        frozen_dm0 = pcmobj.frozen_dm0_for_finite_difference_without_response
+    if frozen_dm0 is not None:
         # Note: The q_sym computed above actually use frozen_dm0 as input, so it's actually q_sym_right
         q_sym_left, _ = pcmobj._get_qsym(dm, with_nuc = True)
         dvj += int1e_grids_ip1(mol, grid_coords, dm = frozen_dm0, charges = q_sym_left,
@@ -510,10 +603,7 @@ def grad_solver(pcmobj, dm, v_grids = None, v_grids_l = None, q = None):
     if (not pcmobj._intermediates or
         not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
         pcmobj.build()
-    dm_cache = pcmobj._intermediates.get('dm', None)
-    if dm_cache is not None and cupy.linalg.norm(dm_cache - dm) < 1e-10:
-        pass
-    else:
+    if not has_intermediates_for(pcmobj, dm):
         pcmobj._get_vind(dm)
 
     gridslice    = pcmobj.surface['gslice_by_atom']
@@ -524,11 +614,15 @@ def grad_solver(pcmobj, dm, v_grids = None, v_grids_l = None, q = None):
     if q is None:
         q = pcmobj._intermediates['q']
     f_epsilon = pcmobj._intermediates['f_epsilon']
-    lowmem_mode = getattr(pcmobj, "lowmem_intermediate_storage", False)
-    if (not pcmobj.if_method_in_CPCM_category) and (not lowmem_mode):
+    if not pcmobj.if_method_in_CPCM_category:
+        # D, S and their derivatives act on vectors straight from the surface
+        # data, whether or not dense matrices exist: the [3,n,n] arrays of the
+        # derivatives, 6 n^2 numbers, are never formed.
         A = pcmobj._intermediates['A']
-        D = pcmobj._intermediates['D']
-        S = pcmobj._intermediates['S']
+        def DT_dot(x):
+            return left_multiply_D(pcmobj.surface, x, transpose = True)
+        def S_dot(x):
+            return left_multiply_S(pcmobj.surface, x)
 
     if pcmobj.frozen_dm0_for_finite_difference_without_response is not None:
         # Note: The v_grids computed above actually use frozen_dm0 as input, so it's actually v_grids_right
@@ -546,16 +640,6 @@ def grad_solver(pcmobj, dm, v_grids = None, v_grids_l = None, q = None):
 
     vK_1 = pcmobj.left_solve_K(v_grids_l, K_transpose = True)
 
-    def contract_bra(a, B, c):
-        ''' i,xij,j->jx '''
-        tmp = a.dot(B)
-        return (tmp*c).T
-
-    def contract_ket(a, B, c):
-        ''' i,xij,j->ix '''
-        tmp = B.dot(c)
-        return (a*tmp).T
-
     natm = natm_without_ghost(pcmobj.mol)
     de = cupy.zeros([natm, 3])
     if pcmobj.method.upper() in ['C-PCM', 'CPCM', 'COSMO']:
@@ -571,180 +655,80 @@ def grad_solver(pcmobj, dm, v_grids = None, v_grids_l = None, q = None):
         # dK = dS - f_eps/(2*pi) * (dD*A*S + D*dA*S + D*A*dS)
         fac = f_epsilon/(2.0*PI)
 
-        if not lowmem_mode:
-            dF, dA = get_dF_dA(pcmobj.surface, surface_discretization_method = pcmobj.surface_discretization_method)
-            dSii = get_dSii(pcmobj.surface, dF)
-            dF = None
+        Av = A*v_grids
+        de_dR  = 0.5*fac * vK_1.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, Av, stream = None)
+        de_dR -= 0.5*fac * Av.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1, transpose = True, stream = None)
+        de_dR  = cupy.asarray([cupy.sum(de_dR[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            dD, dS = get_dD_dS(pcmobj.surface, with_D=True, with_S=True)
+        de_dS0  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, q, stream = None)
+        de_dS0 -= 0.5 * q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1, transpose = True, stream = None)
+        de_dS0  = cupy.asarray([cupy.sum(de_dS0[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            Av = A*v_grids
-            de_dR  = 0.5*fac * contract_ket(vK_1, dD, Av)
-            de_dR -= 0.5*fac * contract_bra(vK_1, dD, Av)
-            de_dR  = cupy.asarray([cupy.sum(de_dR[p0:p1], axis=0) for p0,p1 in gridslice])
+        vK_1_D = DT_dot(vK_1)
+        vK_1_DA = vK_1_D * A
+        de_dS1  = 0.5 * vK_1_DA.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, q, stream = None)
+        de_dS1 -= 0.5 * q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1_DA, transpose = True, stream = None)
+        de_dS1  = cupy.asarray([cupy.sum(de_dS1[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            vK_1_D = vK_1.dot(D)
-            vK_1_Dv = vK_1_D * v_grids
-            de_dR += 0.5*fac * contract('j,xjn->nx', vK_1_Dv, dA)
+        Sq = S_dot(q)
+        ASq = A * Sq
+        de_dD  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, ASq, stream = None)
+        de_dD -= 0.5 * ASq.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1, transpose = True, stream = None)
+        de_dD  = cupy.asarray([cupy.sum(de_dD[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            de_dS0  = 0.5*contract_ket(vK_1, dS, q)
-            de_dS0 -= 0.5*contract_bra(vK_1, dS, q)
-            de_dS0  = cupy.asarray([cupy.sum(de_dS0[p0:p1], axis=0) for p0,p1 in gridslice])
+        de_dK = de_dS0 - fac * (de_dD + de_dS1)
+        de_dK += 0.5 * contract_dSii(pcmobj.surface, vK_1 * q - fac * vK_1_DA * q, pcmobj.surface_discretization_method)
 
-            vK_1_q = vK_1 * q
-            de_dS0 += 0.5*contract('i,xin->nx', vK_1_q, dSii)
-
-            vK_1_DA = vK_1_D*A
-            de_dS1  = 0.5*contract_ket(vK_1_DA, dS, q)
-            de_dS1 -= 0.5*contract_bra(vK_1_DA, dS, q)
-            de_dS1  = cupy.asarray([cupy.sum(de_dS1[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            vK_1_DAq = vK_1_DA*q
-            de_dS1 += 0.5*contract('j,xjn->nx', vK_1_DAq, dSii)
-
-            Sq = cupy.dot(S,q)
-            ASq = A*Sq
-            de_dD  = 0.5*contract_ket(vK_1, dD, ASq)
-            de_dD -= 0.5*contract_bra(vK_1, dD, ASq)
-            de_dD  = cupy.asarray([cupy.sum(de_dD[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            de_dA = 0.5*contract('j,xjn->nx', vK_1_D*Sq, dA)   # 0.5*cupy.einsum('j,xjn,j->nx', vK_1_D, dA, Sq)
-
-            de_dK = de_dS0 - fac * (de_dD + de_dA + de_dS1)
-            de += de_dR - de_dK
-        else:
-            A = pcmobj._intermediates['A']
-            Av = A*v_grids
-            de_dR  = 0.5*fac * vK_1.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, Av, stream = None)
-            de_dR -= 0.5*fac * Av.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1, transpose = True, stream = None)
-            de_dR  = cupy.asarray([cupy.sum(de_dR[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            de_dS0  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, q, stream = None)
-            de_dS0 -= 0.5 * q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1, transpose = True, stream = None)
-            de_dS0  = cupy.asarray([cupy.sum(de_dS0[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            vK_1_D = left_multiply_D(pcmobj.surface, vK_1, transpose = True)
-            vK_1_DA = vK_1_D * A
-            de_dS1  = 0.5 * vK_1_DA.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, q, stream = None)
-            de_dS1 -= 0.5 * q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1_DA, transpose = True, stream = None)
-            de_dS1  = cupy.asarray([cupy.sum(de_dS1[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            Sq = left_multiply_S(pcmobj.surface, q)
-            ASq = A * Sq
-            de_dD  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, ASq, stream = None)
-            de_dD -= 0.5 * ASq.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1, transpose = True, stream = None)
-            de_dD  = cupy.asarray([cupy.sum(de_dD[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            de_dK = de_dS0 - fac * (de_dD + de_dS1)
-            de_dK += 0.5 * contract_dSii(pcmobj.surface, vK_1 * q - fac * vK_1_DA * q, pcmobj.surface_discretization_method)
-
-            de += de_dR - de_dK
-            de += 0.5*fac * contract_dA(pcmobj.surface, vK_1_D * v_grids + vK_1_D * Sq,
-                                        pcmobj.surface_discretization_method) # First term from de_dR, second from de_dK
+        de += de_dR - de_dK
+        de += 0.5*fac * contract_dA(pcmobj.surface, vK_1_D * v_grids + vK_1_D * Sq,
+                                    pcmobj.surface_discretization_method) # First term from de_dR, second from de_dK
 
     elif pcmobj.method.upper() in [ 'SS(V)PE' ]:
         # dR = f_eps/(2*pi) * (dD*A + D*dA),
         # dK = dS - f_eps/(2*pi) * (dD*A*S + D*dA*S + D*A*dS)
         fac = f_epsilon/(2.0*PI)
 
-        if not lowmem_mode:
-            dF, dA = get_dF_dA(pcmobj.surface, surface_discretization_method = pcmobj.surface_discretization_method)
-            dSii = get_dSii(pcmobj.surface, dF)
-            dF = None
+        Av = A*v_grids
+        de_dR  = 0.5*fac * vK_1.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, Av, stream = None)
+        de_dR -= 0.5*fac * Av.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1, transpose = True, stream = None)
+        de_dR  = cupy.asarray([cupy.sum(de_dR[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            dD, dS = get_dD_dS(pcmobj.surface, with_D=True, with_S=True)
+        de_dS0  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, q, stream = None)
+        de_dS0 -= 0.5 * q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1, transpose = True, stream = None)
+        de_dS0  = cupy.asarray([cupy.sum(de_dS0[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            Av = A*v_grids
-            de_dR  = 0.5*fac * contract_ket(vK_1, dD, Av)
-            de_dR -= 0.5*fac * contract_bra(vK_1, dD, Av)
-            de_dR  = cupy.asarray([cupy.sum(de_dR[p0:p1], axis=0) for p0,p1 in gridslice])
+        vK_1_D = DT_dot(vK_1)
+        vK_1_DA = vK_1_D * A
+        de_dS1  = 0.5 * vK_1_DA.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, q, stream = None)
+        de_dS1 -= 0.5 * q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1_DA, transpose = True, stream = None)
+        de_dS1  = cupy.asarray([cupy.sum(de_dS1[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            vK_1_D = vK_1.dot(D)
-            vK_1_Dv = vK_1_D * v_grids
-            de_dR += 0.5*fac * contract('j,xjn->nx', vK_1_Dv, dA)
+        DT_q = DT_dot(q)
+        ADT_q = A * DT_q
+        de_dS1_T  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, ADT_q, stream = None)
+        de_dS1_T -= 0.5 * ADT_q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1, transpose = True, stream = None)
+        de_dS1_T  = cupy.asarray([cupy.sum(de_dS1_T[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            de_dS0  = 0.5*contract_ket(vK_1, dS, q)
-            de_dS0 -= 0.5*contract_bra(vK_1, dS, q)
-            de_dS0  = cupy.asarray([cupy.sum(de_dS0[p0:p1], axis=0) for p0,p1 in gridslice])
+        Sq = S_dot(q)
+        ASq = A * Sq
+        de_dD  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, ASq, stream = None)
+        de_dD -= 0.5 * ASq.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1, transpose = True, stream = None)
+        de_dD  = cupy.asarray([cupy.sum(de_dD[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            vK_1_q = vK_1 * q
-            de_dS0 += 0.5*contract('i,xin->nx', vK_1_q, dSii)
+        # S is symmetric
+        vK_1_S = S_dot(vK_1)
+        vK_1_SA = vK_1_S * A
+        # Attention on the transposed order here
+        de_dD_T  = 0.5 * q.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1_SA, stream = None)
+        de_dD_T -= 0.5 * vK_1_SA.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, q, transpose = True, stream = None)
+        de_dD_T  = cupy.asarray([cupy.sum(de_dD_T[p0:p1], axis=0) for p0,p1 in gridslice])
 
-            vK_1_DA = vK_1_D*A
-            de_dS1  = 0.5*contract_ket(vK_1_DA, dS, q)
-            de_dS1 -= 0.5*contract_bra(vK_1_DA, dS, q)
-            de_dS1  = cupy.asarray([cupy.sum(de_dS1[p0:p1], axis=0) for p0,p1 in gridslice])
-            vK_1_DAq = vK_1_DA*q
-            de_dS1 += 0.5*contract('j,xjn->nx', vK_1_DAq, dSii)
+        de_dK = de_dS0 - 0.5*fac * (de_dD + de_dS1 + de_dD_T + de_dS1_T)
+        de_dK += 0.5 * contract_dSii(pcmobj.surface, vK_1 * q - 0.5*fac * (vK_1_DA * q + vK_1 * ADT_q), pcmobj.surface_discretization_method)
 
-            DT_q = cupy.dot(D.T, q)
-            ADT_q = A * DT_q
-            de_dS1_T  = 0.5*contract_ket(vK_1, dS, ADT_q)
-            de_dS1_T -= 0.5*contract_bra(vK_1, dS, ADT_q)
-            de_dS1_T  = cupy.asarray([cupy.sum(de_dS1_T[p0:p1], axis=0) for p0,p1 in gridslice])
-            vK_1_ADT_q = vK_1 * ADT_q
-            de_dS1_T += 0.5*contract('j,xjn->nx', vK_1_ADT_q, dSii)
-
-            Sq = cupy.dot(S,q)
-            ASq = A*Sq
-            de_dD  = 0.5*contract_ket(vK_1, dD, ASq)
-            de_dD -= 0.5*contract_bra(vK_1, dD, ASq)
-            de_dD  = cupy.asarray([cupy.sum(de_dD[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            vK_1_S = cupy.dot(vK_1, S)
-            vK_1_SA = vK_1_S * A
-            de_dD_T  = 0.5*contract_ket(vK_1_SA, -dD.transpose(0,2,1), q)
-            de_dD_T -= 0.5*contract_bra(vK_1_SA, -dD.transpose(0,2,1), q)
-            de_dD_T  = cupy.asarray([cupy.sum(de_dD_T[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            de_dA = 0.5*contract('j,xjn->nx', vK_1_D*Sq, dA)   # 0.5*cupy.einsum('j,xjn,j->nx', vK_1_D, dA, Sq)
-
-            de_dA_T = 0.5*contract('j,xjn->nx', vK_1_S*DT_q, dA)
-
-            de_dK = de_dS0 - 0.5 * fac * (de_dD + de_dA + de_dS1 + de_dD_T + de_dA_T + de_dS1_T)
-            de += de_dR - de_dK
-        else:
-            A = pcmobj._intermediates['A']
-            Av = A*v_grids
-            de_dR  = 0.5*fac * vK_1.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, Av, stream = None)
-            de_dR -= 0.5*fac * Av.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1, transpose = True, stream = None)
-            de_dR  = cupy.asarray([cupy.sum(de_dR[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            de_dS0  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, q, stream = None)
-            de_dS0 -= 0.5 * q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1, transpose = True, stream = None)
-            de_dS0  = cupy.asarray([cupy.sum(de_dS0[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            vK_1_D = left_multiply_D(pcmobj.surface, vK_1, transpose = True)
-            vK_1_DA = vK_1_D * A
-            de_dS1  = 0.5 * vK_1_DA.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, q, stream = None)
-            de_dS1 -= 0.5 * q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1_DA, transpose = True, stream = None)
-            de_dS1  = cupy.asarray([cupy.sum(de_dS1[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            DT_q = left_multiply_D(pcmobj.surface, q, transpose = True)
-            ADT_q = A * DT_q
-            de_dS1_T  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, ADT_q, stream = None)
-            de_dS1_T -= 0.5 * ADT_q.reshape(-1, 1) * left_multiply_dS_offdiagonal(pcmobj.surface, vK_1, transpose = True, stream = None)
-            de_dS1_T  = cupy.asarray([cupy.sum(de_dS1_T[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            Sq = left_multiply_S(pcmobj.surface, q)
-            ASq = A * Sq
-            de_dD  = 0.5 * vK_1.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, ASq, stream = None)
-            de_dD -= 0.5 * ASq.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1, transpose = True, stream = None)
-            de_dD  = cupy.asarray([cupy.sum(de_dD[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            vK_1_S = left_multiply_S(pcmobj.surface, vK_1, transpose = True)
-            vK_1_SA = vK_1_S * A
-            # Attention on the transposed order here
-            de_dD_T  = 0.5 * q.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, vK_1_SA, stream = None)
-            de_dD_T -= 0.5 * vK_1_SA.reshape(-1, 1) * left_multiply_dD(pcmobj.surface, q, transpose = True, stream = None)
-            de_dD_T  = cupy.asarray([cupy.sum(de_dD_T[p0:p1], axis=0) for p0,p1 in gridslice])
-
-            de_dK = de_dS0 - 0.5*fac * (de_dD + de_dS1 + de_dD_T + de_dS1_T)
-            de_dK += 0.5 * contract_dSii(pcmobj.surface, vK_1 * q - 0.5*fac * (vK_1_DA * q + vK_1 * ADT_q), pcmobj.surface_discretization_method)
-
-            de += de_dR - de_dK
-            de += 0.5*fac * contract_dA(pcmobj.surface, vK_1_D * v_grids + 0.5 * (vK_1_D * Sq + vK_1_S * DT_q),
-                                        pcmobj.surface_discretization_method) # First term from de_dR, second from de_dK
+        de += de_dR - de_dK
+        de += 0.5*fac * contract_dA(pcmobj.surface, vK_1_D * v_grids + 0.5 * (vK_1_D * Sq + vK_1_S * DT_q),
+                                    pcmobj.surface_discretization_method) # First term from de_dR, second from de_dK
 
     else:
         raise RuntimeError(f"Unknown implicit solvent model: {pcmobj.method}")

@@ -28,6 +28,10 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
     '''
     if mol is None: mol = ks.mol
     if dm is None: dm = ks.make_rdm1()
+    # The density that vhf_last was built from: its J and K are in vhf_last,
+    # only the XC terms are evaluated (see rks.get_veff)
+    unchanged = dm_last is dm and getattr(vhf_last, 'vj', None) is not None
+    dm_in = dm
     if isinstance(dm, cupy.ndarray) and dm.ndim == 2:
         dm = cupy.repeat(dm[None]*.5, 2, axis=0)
     else:
@@ -51,7 +55,15 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
             else:
                 assert ni.libxc.is_nlc(ks.nlc)
                 xc = ks.nlc
-            n, enlc, vnlc = ni.nr_nlc_vxc(mol, ks.nlcgrids, xc, dm)
+            # The VV10 density from the orbitals where the density carries
+            # them, as RKS and the nuclear gradient evaluate it (the gradient
+            # then finds the potential of this density kept: numint._vv10nlc)
+            dm_nlc = dm
+            mo_coeff = getattr(dm_in, 'mo_coeff', None)
+            if (isinstance(mo_coeff, cupy.ndarray) and mo_coeff.ndim == 3
+                    and getattr(dm_in, 'ndim', 0) == 3):
+                dm_nlc = dm_in
+            n, enlc, vnlc = ni.nr_nlc_vxc(mol, ks.nlcgrids, xc, dm_nlc)
             exc += enlc
             vxc += vnlc
             log.debug('nelec with nlc grids = %s', n)
@@ -68,7 +80,11 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
     if hybrid:
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(ks.xc, spin=mol.spin)
     vk = None
-    if hybrid and ks.jk_one_pass and omega == 0:
+    if unchanged:
+        vj = cupy.zeros_like(dm[0])
+        if hybrid:
+            vk = cupy.zeros_like(dm)
+    elif hybrid and ks.jk_one_pass and omega == 0:
         # J and K in one Rys pass, see hf.get_veff. jk.get_jk has no such pass for range-separated K.
         vj, vk = ks.get_jk(mol, dm, hermi)
         vj = vj[0] + vj[1]

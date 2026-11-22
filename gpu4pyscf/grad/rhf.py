@@ -63,8 +63,15 @@ def _jk_energy_per_atom(vhfopt, dm, j_factor=1., k_factor=1.,
     '''
     Computes the first-order derivatives of the energy per atom for
     j_factor * J_derivatives - k_factor * K_derivatives
+
+    With omega, lr_factor and sr_factor the integrals are those of the operator
+    lr_factor * erf(omega r)/r + sr_factor * erfc(omega r)/r (see
+    jk._check_rsh_factors). Both the J and the K terms of one call are
+    contracted with these integrals, so a call for an attenuated K has
+    j_factor = 0. The Schwarz bounds of vhfopt have to hold for the operator:
+    those of the full-range integrals do for any lr_factor and sr_factor up
+    to 1.
     '''
-    assert lr_factor is None and sr_factor is None
     log = logger.new_logger(vhfopt.mol, verbose)
     cput0 = log.init_timer()
     mol = vhfopt.sorted_mol
@@ -97,7 +104,7 @@ def _jk_energy_per_atom(vhfopt, dm, j_factor=1., k_factor=1.,
              for j in range(i+1)
              for k in range(i+1)
              for l in range(k+1)]
-    schemes = {t: _ejk_quartets_scheme(mol, uniq_l_ctr[list(t)]) for t in tasks}
+    schemes = {t: _ejk_quartets_scheme(mol, uniq_l_ctr[list(t)], omega=omega) for t in tasks}
     tasks = iter(tasks)
 
     def proc():
@@ -179,7 +186,11 @@ def _jk_energy_per_atom(vhfopt, dm, j_factor=1., k_factor=1.,
     log.timer_debug1('grad jk energy', *cput0)
     return ejk.get()
 
-def _ejk_quartets_scheme(mol, l_ctr_pattern, shm_size=SHM_SIZE):
+def _ejk_quartets_scheme(mol, l_ctr_pattern, shm_size=SHM_SIZE, omega=None):
+    '''omega is the one passed to the kernel (negative when short-range
+    integrals are evaluated, which doubles the number of roots); by default
+    that of mol.
+    '''
     ls = l_ctr_pattern[:,0]
     li, lj, lk, ll = ls
     order = li + lj + lk + ll
@@ -188,7 +199,9 @@ def _ejk_quartets_scheme(mol, l_ctr_pattern, shm_size=SHM_SIZE):
     ij_prims = nps[0] * nps[1]
     nroots = (order + 1) // 2 + 1
     unit = nroots*2 + g_size*3 + 6
-    if mol.omega < 0: # SR
+    if omega is None:
+        omega = mol.omega
+    if omega < 0: # SR
         unit += nroots * 2
     counts = (shm_size - ij_prims*8) // (unit*8)
     n = min(THREADS, _nearest_power2(counts))
@@ -644,12 +657,25 @@ class Gradients(GradientsBase):
                 if dm.ndim == 3:
                     dm = dm.sum(axis=0)
                 return j_factor * jopt.get_ej_ip1(dm, verbose)
-        vhfopt = mf._opt_gpu.get(omega)
+        # The integral bounds to screen with: those of the operator of omega
+        # (libcint's convention: long-range for omega > 0, short-range for
+        # omega < 0) or of the one range that the factors leave, or, for a
+        # combination of the two ranges in one pass, those of the full-range
+        # integrals, which bound both.
+        key = omega
+        if omega and (lr_factor is not None or sr_factor is not None):
+            if not lr_factor:
+                key = -abs(omega)
+            elif not sr_factor:
+                key = abs(omega)
+            else:
+                key = None
+        vhfopt = mf._opt_gpu.get(key)
         if vhfopt is None:
             # For LDA and GGA, only mf._opt_jengine is initialized
             mol = mf.mol
-            with mol.with_range_coulomb(omega):
-                vhfopt = mf._opt_gpu[omega] = _VHFOpt(
+            with mol.with_range_coulomb(key):
+                vhfopt = mf._opt_gpu[key] = _VHFOpt(
                     mol, mf.direct_scf_tol).build()
         return _jk_energy_per_atom(vhfopt, dm, j_factor, k_factor,
                                    omega, lr_factor, sr_factor, verbose)

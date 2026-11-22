@@ -60,29 +60,33 @@ def partial_hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
     with_k = ni.libxc.is_hybrid_xc(mf.xc)
     j_factor = 1.
     k_factor = 0.
+    # The exchange of a range-separated hybrid, hyb K_SR + alpha K_LR: the
+    # kernels evaluate long-range integrals with the n Rys roots of the
+    # full-range ones and short-range integrals with 2n, so the second pass is
+    # the long-range part where there is one (see grad.rks._jk_energy_per_atom)
     if with_k:
         if omega == 0:
             k_factor = hyb
         elif alpha == 0: # LR=0, only SR exchange
             pass
         elif hyb == 0: # SR=0, only LR exchange
-            k_factor = alpha
+            pass
         else: # SR and LR exchange with different ratios
-            k_factor = alpha
+            k_factor = hyb
     de2, ejk = uhf_hess._partial_hess_ejk(hessobj, mo_energy, mo_coeff, mo_occ,
                                           atmlst, max_memory, verbose,
                                           j_factor, k_factor)
     de2 += ejk  # (A,B,dR_A,dR_B)
     if with_k and omega != 0:
         j_factor = 0.
-        omega = -omega # Prefer computing the SR part
+        omega = abs(omega)
         if alpha == 0: # LR=0, only SR exchange
+            omega = -omega
             k_factor = hyb
         elif hyb == 0: # SR=0, only LR exchange
-            # full range exchange was computed in the previous step
-            k_factor = -alpha
+            k_factor = alpha
         else: # SR and LR exchange with different ratios
-            k_factor = hyb - alpha # =beta
+            k_factor = alpha - hyb
         vhfopt = mf._opt_gpu.get(omega, None)
         with mol.with_range_coulomb(omega):
             de2 += rhf_hess._partial_ejk_ip2(

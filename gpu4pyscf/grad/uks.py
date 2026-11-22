@@ -77,33 +77,7 @@ def energy_ee(ks_grad, mol=None, dm=None, verbose=None):
         if ks_grad.grid_response:
             exc1 += enlc1_grid
 
-    omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
-    with_k = ni.libxc.is_hybrid_xc(mf.xc)
-    j_factor = 1.
-    k_factor = 0.
-    if with_k:
-        if omega == 0:
-            k_factor = hyb
-        elif alpha == 0: # LR=0, only SR exchange
-            pass
-        elif hyb == 0: # SR=0, only LR exchange
-            k_factor = alpha
-        else: # SR and LR exchange with different ratios
-            k_factor = alpha
-    exc1 += ks_grad.jk_energy_per_atom(dm, j_factor, k_factor, verbose=log)
-
-    if with_k and omega != 0:
-        j_factor = 0.
-        omega = -omega # Prefer computing the SR part
-        if alpha == 0: # LR=0, only SR exchange
-            k_factor = hyb
-        elif hyb == 0: # SR=0, only LR exchange
-            # full range exchange was computed in the previous step
-            k_factor = -alpha
-        else: # SR and LR exchange with different ratios
-            k_factor = hyb - alpha # =beta
-        exc1 += ks_grad.jk_energy_per_atom(
-            dm, j_factor, k_factor, omega=omega, verbose=log)
+    exc1 += rks_grad._jk_energy_per_atom(ks_grad, dm, verbose=log)
     return exc1
 
 def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,

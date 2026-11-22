@@ -82,34 +82,41 @@ def energy_ee(ks_grad, mol=None, dm=None, verbose=None):
         if ks_grad.grid_response:
             exc1 += enlc1_grid
 
-    omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
-    with_k = ni.libxc.is_hybrid_xc(mf.xc)
-    j_factor = 1.
-    k_factor = 0.
-    if with_k:
-        if omega == 0:
-            k_factor = hyb
-        elif alpha == 0: # LR=0, only SR exchange
-            pass
-        elif hyb == 0: # SR=0, only LR exchange
-            k_factor = alpha
-        else: # SR and LR exchange with different ratios
-            k_factor = alpha
-    exc1 += ks_grad.jk_energy_per_atom(dm, j_factor, k_factor, verbose=log)
-
-    if with_k and omega != 0:
-        j_factor = 0.
-        omega = -omega # Prefer computing the SR part
-        if alpha == 0: # LR=0, only SR exchange
-            k_factor = hyb
-        elif hyb == 0: # SR=0, only LR exchange
-            # full range exchange was computed in the previous step
-            k_factor = -alpha
-        else: # SR and LR exchange with different ratios
-            k_factor = hyb - alpha # =beta
-        exc1 += ks_grad.jk_energy_per_atom(
-            dm, j_factor, k_factor, omega=omega, verbose=log)
+    exc1 += _jk_energy_per_atom(ks_grad, dm, verbose=log)
     return exc1
+
+def _jk_energy_per_atom(ks_grad, dm, verbose=None):
+    '''The Coulomb and exchange terms of the functional's energy derivatives.
+
+    The exchange of a range-separated hybrid is hyb K_SR + alpha K_LR. The Rys
+    kernels evaluate the long-range integrals with the n roots of the
+    full-range ones, the short-range integrals with 2n. With both ranges
+    present this is J + hyb K of the full range in one pass, where the J
+    integrals are those of K, and (alpha - hyb) K_LR in a second: two passes
+    of n roots. (Before: J + alpha K of the full range, then (hyb - alpha) K_SR
+    with 2n roots, 1.4 times the time for caffeine; one pass for the K of
+    alpha erf + hyb erfc takes 2n roots as well and leaves J to a pass of its
+    own.) With one range alone, J comes by itself (from the J engine where
+    that has a gradient) and K from one pass of that range.
+    '''
+    mf = ks_grad.base
+    ni = mf._numint
+    omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=mf.mol.spin)
+    if not ni.libxc.is_hybrid_xc(mf.xc):
+        return ks_grad.jk_energy_per_atom(dm, 1., 0., verbose=verbose)
+    if omega == 0:
+        return ks_grad.jk_energy_per_atom(dm, 1., hyb, verbose=verbose)
+    omega = abs(omega)
+    if alpha == 0: # LR=0, only SR exchange
+        ejk = ks_grad.jk_energy_per_atom(dm, 1., 0., verbose=verbose)
+        ejk += ks_grad.jk_energy_per_atom(dm, 0., hyb, omega=-omega, verbose=verbose)
+    elif hyb == 0: # SR=0, only LR exchange
+        ejk = ks_grad.jk_energy_per_atom(dm, 1., 0., verbose=verbose)
+        ejk += ks_grad.jk_energy_per_atom(dm, 0., alpha, omega=omega, verbose=verbose)
+    else: # SR and LR exchange with different ratios
+        ejk = ks_grad.jk_energy_per_atom(dm, 1., hyb, verbose=verbose)
+        ejk += ks_grad.jk_energy_per_atom(dm, 0., alpha-hyb, omega=omega, verbose=verbose)
+    return ejk
 
 def _get_denlc(ks_grad, mol, dm):
     mf = ks_grad.base
@@ -378,7 +385,9 @@ def get_nlc_exc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
     rho = cupy.hstack(vvrho)
     vvrho = None
 
-    vxc = numint._vv10nlc(rho, grids.coords, grids.weights, nlc_pars)[1]
+    # the potential of this density, kept by ni when the SCF's last cycle
+    # evaluated it on these points
+    vxc = numint._vv10nlc(rho, grids.coords, grids.weights, nlc_pars, memo=ni)[1]
     vv_vxc = xc_deriv.transform_vxc(rho, vxc, 'GGA', spin=0)
 
     ao_deriv = 2
