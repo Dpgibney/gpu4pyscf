@@ -26,7 +26,6 @@ from gpu4pyscf.solvent._solvent_data import solvent_db, resolve_solvent_name
 from gpu4pyscf.solvent.pcm import natm_without_ghost
 from gpu4pyscf.lib import logger
 from gpu4pyscf.gto import int3c1e
-from cupyx.scipy.linalg import lu_factor
 from gpu4pyscf.lib import utils
 
 @lib.with_doc(_attach_solvent._for_scf.__doc__)
@@ -268,27 +267,21 @@ class SMD(lib.StreamObject):
             raise RuntimeError('SMD does not support ghost atoms')
 
         self.surface = pcm.gen_surface(mol, rad=radii_table, ng=ng)
-        self._intermediates = {}
-        F, A = pcm.get_F_A(self.surface)
-        D, S = pcm.get_D_S(self.surface, with_S=True, with_D=True)
+        self._intermediates = pcm._Intermediates()
 
         epsilon = self.get_eps()
         f_epsilon = (epsilon - 1.0)/(epsilon + 1.0) if epsilon != float('inf') else 1.
-        DA = D*A
-        DAS = cupy.dot(DA, S)
-        K = S - f_epsilon/(2.0*np.pi) * DAS
-        K_LU, K_LU_pivot = lu_factor(K, overwrite_a = True, check_finite = False)
-        K = None
-
-        intermediates = {
-            'S': cupy.asarray(S),
-            'D': cupy.asarray(D),
+        # K = S - f_epsilon/(2.0*np.pi) * D A S, as in IEF-PCM. Its factors
+        # are kept; D and S are applied from the surface data, or built again
+        # where their matrices are read (pcm._Intermediates)
+        K_LU, K_LU_pivot, A = pcm._factorized_K(self.surface, self.method, f_epsilon)
+        self._intermediates.update({
             'A': cupy.asarray(A),
             'K_LU': cupy.asarray(K_LU),
             'K_LU_pivot': cupy.asarray(K_LU_pivot),
             'f_epsilon': f_epsilon
-        }
-        self._intermediates.update(intermediates)
+        })
+        self._intermediates.surface = self.surface
 
         charge_exp  = self.surface['charge_exp']
         grid_coords = self.surface['grid_coords']
