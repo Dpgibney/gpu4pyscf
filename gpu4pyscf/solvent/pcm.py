@@ -605,6 +605,7 @@ class PCM(lib.StreamObject):
         self.v = None
         self.v_grids_n = None
         self._intermediates = {}
+        self._int1e_opt = None
 
     def __setattr__(self, key, val):
         if key == 'solvent':
@@ -832,20 +833,40 @@ class PCM(lib.StreamObject):
 
         return v_grids
 
+    def _grid_integrals(self):
+        '''The data of gpu4pyscf.sgx.int1e_grids for the two contractions of
+        the reaction field with the integrals of the surface charges, which
+        its kernels evaluate at a third of the time of the int3c1e ones; None
+        beyond their angular momenta (int3c1e then).'''
+        if getattr(self, '_int1e_opt', None) is None:
+            from gpu4pyscf.sgx import int1e_grids as grid_ints
+            from gpu4pyscf.sgx.kernels import LMAX
+            if self.mol._bas[:,gto.ANG_OF].max() > LMAX:
+                self._int1e_opt = False
+            else:
+                self._int1e_opt = grid_ints.Int1eGridsOpt(self.mol)
+        return self._int1e_opt or None
+
     def _get_v(self, dms):
         '''
         return electrostatic potential on surface
         '''
         charge_exp  = self.surface['charge_exp']
         grid_coords = self.surface['grid_coords']
-        v_grids_e = int1e_grids(self.mol, grid_coords, dm = dms, charge_exponents = charge_exp**2, intopt = self.intopt)
-        return v_grids_e
+        opt = self._grid_integrals()
+        if opt is None:
+            return int1e_grids(self.mol, grid_coords, dm = dms, charge_exponents = charge_exp**2, intopt = self.intopt)
+        return opt.density_contracted(dms, grid_coords, charge_exp**2)
 
     def _get_vmat(self, q):
         assert q.ndim == 2
         charge_exp  = self.surface['charge_exp']
         grid_coords = self.surface['grid_coords']
-        vmat = -int1e_grids(self.mol, grid_coords, charges = q, charge_exponents = charge_exp**2, intopt = self.intopt)
+        opt = self._grid_integrals()
+        if opt is None:
+            return -int1e_grids(self.mol, grid_coords, charges = q, charge_exponents = charge_exp**2, intopt = self.intopt)
+        vmat = opt.charge_contracted(q, grid_coords, charge_exp**2)
+        vmat *= -1
         return vmat
 
     def nuc_grad_method(self, grad_method):
@@ -881,6 +902,7 @@ class PCM(lib.StreamObject):
         self._intermediates = None
         self.surface = None
         self.intopt = None
+        self._int1e_opt = None
         self.e = None
         self.v = None
         self.v_grids_n = None
