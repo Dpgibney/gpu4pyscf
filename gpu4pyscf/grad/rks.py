@@ -378,7 +378,9 @@ def get_nlc_exc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
     rho = cupy.hstack(vvrho)
     vvrho = None
 
-    vxc = numint._vv10nlc(rho, grids.coords, grids.weights, nlc_pars)[1]
+    # the potential of this density, kept by ni when the SCF's last cycle
+    # evaluated it on these points
+    vxc = numint._vv10nlc(rho, grids.coords, grids.weights, nlc_pars, memo=ni)[1]
     vv_vxc = xc_deriv.transform_vxc(rho, vxc, 'GGA', spin=0)
 
     ao_deriv = 2

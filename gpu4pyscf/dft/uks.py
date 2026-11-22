@@ -28,6 +28,7 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
     '''
     if mol is None: mol = ks.mol
     if dm is None: dm = ks.make_rdm1()
+    dm_in = dm
     if isinstance(dm, cupy.ndarray) and dm.ndim == 2:
         dm = cupy.repeat(dm[None]*.5, 2, axis=0)
     else:
@@ -51,7 +52,15 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
             else:
                 assert ni.libxc.is_nlc(ks.nlc)
                 xc = ks.nlc
-            n, enlc, vnlc = ni.nr_nlc_vxc(mol, ks.nlcgrids, xc, dm)
+            # The VV10 density from the orbitals where the density carries
+            # them, as RKS and the nuclear gradient evaluate it (the gradient
+            # then finds the potential of this density kept: numint._vv10nlc)
+            dm_nlc = dm
+            mo_coeff = getattr(dm_in, 'mo_coeff', None)
+            if (isinstance(mo_coeff, cupy.ndarray) and mo_coeff.ndim == 3
+                    and getattr(dm_in, 'ndim', 0) == 3):
+                dm_nlc = dm_in
+            n, enlc, vnlc = ni.nr_nlc_vxc(mol, ks.nlcgrids, xc, dm_nlc)
             exc += enlc
             vxc += vnlc
             log.debug('nelec with nlc grids = %s', n)
