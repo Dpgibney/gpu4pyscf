@@ -1435,6 +1435,12 @@ class SCF(pyscf_lib.StreamObject):
     def Hessian(self):
         raise NotImplementedError
 
+    def COSX(self, with_sgx=None):
+        '''This method with its exchange evaluated seminumerically
+        (gpu4pyscf.sgx): an approximation, J unchanged'''
+        from gpu4pyscf.sgx import sgx
+        return sgx.cosx(self, with_sgx)
+
     def _transfer_attrs_(self, dst):
         '''This helper function transfers attributes from one SCF object to
         another SCF object. It is invoked by to_ks and to_hf methods.
