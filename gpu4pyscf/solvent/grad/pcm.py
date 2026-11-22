@@ -448,6 +448,88 @@ def grad_nuc(pcmobj, dm, q_sym = None):
     t1 = log.timer_debug1('grad nuc', *t1)
     return de
 
+def _int3c2e_opt_for_charges(pcmobj):
+    '''The 3-center integral data of the molecule's basis with the surface
+    charges of pcmobj as auxiliary functions, one normalized s Gaussian and
+    one center each'''
+    from gpu4pyscf.df.int3c2e_bdiv import Int3c2eOpt
+    charge_exp  = pcmobj.surface['charge_exp']
+    grid_coords = pcmobj.surface['grid_coords']
+    fakemol = gto.fakemol_for_charges(grid_coords.get(), expnt=charge_exp.get()**2)
+    return Int3c2eOpt(pcmobj.mol, fakemol).build(1e-14)
+
+def _grad_qv_int3c2e(pcmobj, dm, q_sym, int3c2e_opt):
+    '''grad_qv's two terms for a symmetric density matrix from the kernel of
+    the density-fitted Coulomb gradient (sum_ejk_int3c2e_ip1), with the
+    surface charges as its auxiliary vector: sum_ij,g D_ij q_g d(ij|g)/dR for
+    the centers of the basis functions, per atom, and, by translational
+    invariance, for those of the charges, per charge. One pass of the Rys
+    3-center kernels instead of two passes of the int3c1e ones, the first of
+    which also builds a [3,nao,nao] matrix: 2.5-3 times faster for caffeine.
+    '''
+    from gpu4pyscf.df.int3c2e_bdiv import int3c2e_scheme, libvhf_rys
+    from gpu4pyscf.gto.mole import _split_l_ctr_groups
+    from gpu4pyscf.lib.cupy_helper import transpose_sum
+    mol = int3c2e_opt.mol
+    auxmol = int3c2e_opt.auxmol
+    gridslice = pcmobj.surface['gslice_by_atom']
+    ngrids = pcmobj.surface['grid_coords'].shape[0]
+
+    dm = mol.apply_C_mat_CT(cupy.asarray(dm))
+    dm = transpose_sum(dm, inplace=True)
+    dm *= .5
+    auxvec = auxmol.C_dot_mat(cupy.asarray(q_sym))
+    naux = len(auxvec)
+
+    nsp_per_block, gout_stride, shm_size = int3c2e_scheme(gout_width=54, deriv=(1,0,0))
+    lmax = mol.uniq_l_ctr[:,0].max()
+    laux = auxmol.uniq_l_ctr[:,0].max()
+    shm_size_max = shm_size[:laux+1,:lmax+1,:lmax+1].max()
+    bas_ij_idx, shl_pair_offsets = mol.aggregate_shl_pairs(
+        int3c2e_opt.bas_ij_cache, nsp_per_block[0]*16)
+    # Split the charges into small batches for load balance
+    _, aux_counts = _split_l_ctr_groups(
+        auxmol.uniq_l_ctr, auxmol.l_ctr_counts, [16]*(laux+1))
+    ksh_offsets_cpu = numpy.append(0, numpy.cumsum(aux_counts))
+    ksh_offsets_gpu = cupy.asarray(ksh_offsets_cpu+mol.nbas, dtype=numpy.int32)
+
+    int3c2e_envs = int3c2e_opt.int3c2e_envs
+    natm = pcmobj.mol.natm
+    # per atom of the basis functions, and per charge (each its own center)
+    ej = cupy.zeros((natm, 3))
+    ej_grids = cupy.zeros((ngrids, 3))
+    err = libvhf_rys.sum_ejk_int3c2e_ip1(
+        ctypes.cast(ej.data.ptr, ctypes.c_void_p),
+        ctypes.cast(ej_grids.data.ptr, ctypes.c_void_p),
+        ctypes.cast(dm.data.ptr, ctypes.c_void_p),
+        ctypes.cast(auxvec.data.ptr, ctypes.c_void_p),
+        ctypes.c_int(1),
+        ctypes.c_double(0.), ctypes.c_double(1.), ctypes.c_double(1.),
+        ctypes.byref(int3c2e_envs),
+        ctypes.c_int(int(shm_size_max)),
+        ctypes.c_int(len(shl_pair_offsets) - 1),
+        ctypes.c_int(len(ksh_offsets_cpu) - 1),
+        ctypes.cast(shl_pair_offsets.data.ptr, ctypes.c_void_p),
+        ctypes.cast(bas_ij_idx.data.ptr, ctypes.c_void_p),
+        ctypes.cast(ksh_offsets_gpu.data.ptr, ctypes.c_void_p),
+        ctypes.cast(gout_stride.data.ptr, ctypes.c_void_p),
+        pyscf_lib.c_null_ptr(),
+        ctypes.c_int(0),
+        ctypes.c_int(0), ctypes.c_int(0),
+        ctypes.c_int(naux), ctypes.c_int(natm))
+    if err != 0:
+        raise RuntimeError('sum_ejk_int3c2e_ip1 failed')
+    dq = cupy.asarray([cupy.sum(ej_grids[p0:p1], axis=0) for p0,p1 in gridslice])
+    dq = gradient_nonghost_to_all(pcmobj.mol, dq)
+    # the functions' derivatives of the kernel are those of both functions of
+    # each pair of the lower triangle, and the surface charges' potential
+    # enters the energy with the sign of the electrons' charge
+    return -2.0 * (ej + dq)
+
+def _is_symmetric(dm):
+    return (dm.ndim == 2 and dm.shape[0] == dm.shape[1]
+            and float(abs(dm - dm.T).max()) <= 1e-12 * max(1., float(abs(dm).max())))
+
 def grad_qv(pcmobj, dm, q_sym = None):
     '''
     contributions due to integrals
@@ -466,6 +548,23 @@ def grad_qv(pcmobj, dm, q_sym = None):
     if q_sym is None:
         q_sym = pcmobj._intermediates['q_sym']
 
+    from gpu4pyscf.df.int3c2e_bdiv import LMAX
+    frozen_dm0 = pcmobj.frozen_dm0_for_finite_difference_without_response
+    dm = cupy.asarray(dm)
+    if (mol._bas[:,gto.ANG_OF].max() <= LMAX and q_sym.ndim == 1 and _is_symmetric(dm)
+            and (frozen_dm0 is None or _is_symmetric(cupy.asarray(frozen_dm0)))):
+        # One pass of the Rys 3-center kernels (symmetric densities; a
+        # density that is not symmetric takes the int3c1e kernels below, whose
+        # first term is the derivative of the bra functions alone)
+        int3c2e_opt = _int3c2e_opt_for_charges(pcmobj)
+        de = _grad_qv_int3c2e(pcmobj, dm, q_sym, int3c2e_opt)
+        if frozen_dm0 is not None:
+            # Note: The q_sym computed above actually use frozen_dm0 as input, so it's actually q_sym_right
+            q_sym_left, _ = pcmobj._get_qsym(dm, with_nuc = True)
+            de += _grad_qv_int3c2e(pcmobj, frozen_dm0, q_sym_left, int3c2e_opt)
+        t1 = log.timer_debug1('grad qv', *t1)
+        return de.get()
+
     intopt = int3c1e.VHFOpt(mol)
     intopt.build(1e-14, aosym=False)
     dvj = int1e_grids_ip1(mol, grid_coords, dm = dm, charges = q_sym,
@@ -475,8 +574,7 @@ def grad_qv(pcmobj, dm, q_sym = None):
                           direct_scf_tol = 1e-14, charge_exponents = charge_exp**2,
                           intopt=intopt)
 
-    if pcmobj.frozen_dm0_for_finite_difference_without_response is not None:
-        frozen_dm0 = pcmobj.frozen_dm0_for_finite_difference_without_response
+    if frozen_dm0 is not None:
         # Note: The q_sym computed above actually use frozen_dm0 as input, so it's actually q_sym_right
         q_sym_left, _ = pcmobj._get_qsym(dm, with_nuc = True)
         dvj += int1e_grids_ip1(mol, grid_coords, dm = frozen_dm0, charges = q_sym_left,
