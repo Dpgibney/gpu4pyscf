@@ -30,31 +30,46 @@ orbital gradient of the model there, the tests of its convergence. The
 solution is the model's own, to its convergence thresholds.
 
 The cheap model here is a copy on coarser XC and VV10 grids (levels
-two_level_grids_level and two_level_nlcgrids_level). Its J and K are the
-model's own, so the J and K of a reference are those the cheap model has
-built for that density, and a reference costs the XC and VV10 terms on the
-model's grids alone. Every iteration still builds J and K, so the references
-are the cheaper step here: the first is taken once the cheap model is
-converged to two_level_conv_tol only (1e-5: later, the correction sets the
-iterations back by one; earlier, the second reference may not pass), and the
-DIIS history goes on across the references (the constant
-V[D_ref] - V_cheap[D_ref] is added to its Fock matrices, with their error
-vectors following), so that the iterations are those of the plain SCF.
+two_level_grids_level and two_level_nlcgrids_level), with
+
+- for a hybrid whose K comes from the four-center integrals, the
+  seminumerical K of gpu4pyscf.sgx on the SGX grid of level
+  two_level_sgx_level (1), its kernels in single precision
+  (two_level_sgx_dtype): the builds are those of the changes of the density,
+  so their rounding falls with the changes;
+- optionally a fitted J without a stored tensor (two_level_auxbasis, off by
+  default; 'aug_etb').
+
+What the cheap model shares with the model (the solvent terms; J unless it
+is fitted; J and K with two_level_sgx_level = None) is taken from the
+potential the cheap model has built for the reference density. What it
+approximates the model builds at each reference, as the change from its own
+J or K of the last reference; a reference then costs these and the XC and
+VV10 terms on the model's grids. The first reference is taken once the cheap
+model is converged to two_level_conv_tol (1e-5), and the DIIS history goes on
+across the references (the constant V[D_ref] - V_cheap[D_ref] is added to its
+Fock matrices, with their error vectors following), so that the iterations
+are those of the plain SCF. Where a reference builds J or K, the micro cycles
+go on until the energy left in their orbital gradient is below half of
+conv_tol (MICRO_LEFT): a reference that fails by a little costs another.
 
 Caffeine, wB97M-V with XC grid (99,590) and VV10 grid (50,194) in SMD water,
-on a GTX 1650 Super: def2-SVP 127 s -> 54 s, the energy of the plain SCF to
-1e-11 Eh, with its 14 cycles and 2 references.
+on a GTX 1650 Super, the plain SCF, then the cheap model with the model's J
+and K, then with the seminumerical K: def2-SVP 130 s, 53 s, 42 s; def2-TZVP
+382 s, 273 s, 130 s (112 s with the fitted J too); def2-TZVPD 727 s, 584 s,
+246 s (192 s); the energy of the plain SCF to 2e-10 Eh, with its number of
+cycles and 2 references.
 
     >>> mf = dft.RKS(mol, xc='wb97m-v')
     >>> mf.two_level = True
     >>> mf.kernel()
 
-This follows pyscf.scf.two_level of the CPU tree this work comes from, whose
-cheap model also fits J and evaluates K seminumerically.
+This follows pyscf.scf.two_level of the CPU tree this work comes from.
 '''
 
 import numpy
 import cupy
+from pyscf import lib
 from pyscf.data.elements import charge as _charge
 from pyscf.dft import gen_grid as gen_grid_cpu
 from gpu4pyscf.lib import logger
@@ -62,10 +77,21 @@ from gpu4pyscf.lib.cupy_helper import asarray, tag_array, pack_tril
 
 # The micro cycles stop when the predicted energy changes by less than this
 # fraction of conv_tol and the orbital gradient is below this fraction of
-# conv_tol_grad. (Every micro cycle builds J and K here: 1 and .7 stop them
-# where the plain SCF stops, .1 and .3 cost caffeine two cycles more.)
+# conv_tol_grad. (With a cheap model that builds the model's J and K, 1 and .7
+# stop them where the plain SCF stops, .1 and .3 cost caffeine two cycles
+# more.)
 MICRO_ETOL = 1.
 MICRO_GTOL = .7
+# Where the cheap model fits J or evaluates K seminumerically, a reference
+# costs far more than a micro cycle, and one that fails its test by a little
+# costs another: the micro cycles then also go on until the energy left in
+# their orbital gradient at second order (_energy_left) is below this fraction
+# of conv_tol. (Caffeine in SMD water, wB97M-V/def2-SVP: the micro cycles that
+# stopped at |g| = 4.4e-6 left 1.1e-10 Eh, and the reference failed by that.
+# .1 costs a micro cycle more, 3% of the SCF, and changed nothing else: the
+# same references, and the def2-TZVPD energy 1.6e-10 Eh above the plain SCF's
+# with both, which is what the tests of a reference allow at conv_tol 1e-10.)
+MICRO_LEFT = .5
 # The model is also converged at a reference density where 2 |g|^2 / gap, a
 # bound of the energy left in its orbital gradient g at second order (twice
 # that of orbital-energy denominators no smaller than the gap), is below
@@ -167,15 +193,18 @@ def _same_grids(a, b):
 def cheap_scf(mf):
     '''The cheap model of mf for the two-level SCF: a copy with the grids of
     levels two_level_grids_level and two_level_nlcgrids_level where mf's are
-    finer. It shares the integral screening data, the density fitting and the
-    solvent object of mf: its J, K and solvent terms are mf's own. None if mf
-    has no grids, or none finer than those levels, or is not a plain restricted
-    or unrestricted Kohn-Sham model (also with density fitting or a solvent):
-    the low-memory, DFT+U, constrained and smearing variants have potentials or
-    iterations of their own, which the kernel below has not been tried with.
+    finer, the seminumerical K for a hybrid (two_level_sgx_level) and, if
+    asked for, a fitted J (two_level_auxbasis). It shares the integral
+    screening data, the density fitting and the solvent object of mf. None if
+    nothing of this makes it cheaper than mf, or if mf is not a plain
+    restricted or unrestricted Kohn-Sham model (also with density fitting or a
+    solvent): the low-memory, DFT+U, constrained and smearing variants have
+    potentials or iterations of their own, which the kernel below has not been
+    tried with.
     '''
     from gpu4pyscf.dft import rks, uks, rks_lowmem, rkspu, ukspu, ucdft
     from gpu4pyscf.scf import rohf, smearing
+    from gpu4pyscf.df.df_jk import _DFHF
     if not isinstance(mf, (rks.RKS, uks.UKS)):
         return None
     if isinstance(mf, (rohf.ROHF, rks_lowmem.RKS, rkspu.RKSpU, ukspu.UKSpU,
@@ -201,9 +230,144 @@ def cheap_scf(mf):
         setattr(cheap, key, g)
         if not _same_grids(g, grids) and (key == 'grids' or mf.do_nlc()):
             cheaper = True
+    if mf.two_level_auxbasis is not None and not isinstance(mf, _DFHF):
+        # a fitted J for the iterations; the model's own J at each reference
+        from gpu4pyscf.df import df
+        auxbasis = mf.two_level_auxbasis
+        if isinstance(auxbasis, str) and auxbasis.lower().replace('-', '_') == 'aug_etb':
+            from pyscf.df import aug_etb
+            auxbasis = aug_etb(mol)
+        with_dfj = df.DF(mol, auxbasis=auxbasis)
+        with_dfj.verbose = mf.verbose
+        with_dfj.stdout = mf.stdout
+        cheap = lib.set_class(_FittedJ(cheap, with_dfj), (_FittedJ, cheap.__class__))
+        cheaper = True
+    if _direct_k_of_hybrid(mf) and mf.two_level_sgx_level is not None:
+        # K on a grid for the iterations; the model's own K at each reference
+        from gpu4pyscf.sgx import sgx
+        with_sgx = sgx.SGX(mol)
+        with_sgx.grids_level = mf.two_level_sgx_level
+        with_sgx.kernel_dtype = mf.two_level_sgx_dtype
+        with_sgx.verbose = mf.verbose
+        with_sgx.stdout = mf.stdout
+        cheap = sgx.cosx(cheap, with_sgx)
+        cheaper = True
     if not cheaper:
         return None
     return cheap
+
+
+class _FittedJ:
+    '''Mixin of a Kohn-Sham model: J by density fitting without a stored
+    tensor (df_jk.get_j), inside the incremental builds of the model's own
+    get_veff (density_fit() replaces get_veff by one that builds the potential
+    of the whole density in every cycle)'''
+
+    _keys = {'with_dfj'}
+
+    def __init__(self, mf, with_dfj):
+        self.__dict__.update(mf.__dict__)
+        self.with_dfj = with_dfj
+
+    def get_j(self, mol=None, dm=None, hermi=1, omega=None):
+        from gpu4pyscf.df import df_jk
+        if omega:
+            raise NotImplementedError('fitted J of a range-separated operator')
+        if dm is None: dm = self.make_rdm1()
+        return df_jk.get_j(self.with_dfj, asarray(dm), hermi)
+
+    def get_jk(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
+               omega=None, lr_factor=None, sr_factor=None):
+        vj = vk = None
+        if with_j:
+            vj = self.get_j(mol, dm, hermi, omega)
+        if with_k:
+            vk = self.get_k(mol, dm, hermi, omega, lr_factor, sr_factor)
+        return vj, vk
+
+    def reset(self, mol=None):
+        self.with_dfj.reset(mol)
+        return super().reset(mol)
+
+
+def _direct_k_of_hybrid(mf):
+    '''Whether mf builds the K of a hybrid functional from the four-center
+    integrals'''
+    from gpu4pyscf.df.df_jk import _DFHF
+    from gpu4pyscf.sgx.sgx import _COSX
+    if isinstance(mf, _COSX):
+        return False
+    if isinstance(mf, _DFHF) and not mf.only_dfj:
+        return False
+    return mf._numint.libxc.is_hybrid_xc(mf.xc)
+
+
+def _cheap_parts(mf, cheap):
+    '''(J, K): which of them the cheap model builds by an approximation of
+    its own (a fitted J, a seminumerical K), when it is mf's class under these
+    mixins, with the incremental builds of rks.get_veff that keep the
+    exchange part of a potential apart. None otherwise.'''
+    from gpu4pyscf.df.df_jk import _DFHF
+    from gpu4pyscf.sgx.sgx import _COSX
+    j_own = isinstance(cheap, _FittedJ)
+    k_own = isinstance(cheap, _COSX)
+    if not (j_own or k_own) or isinstance(mf, (_COSX, _FittedJ, _DFHF)):
+        return None
+    if getattr(cheap, 'xc', None) != getattr(mf, 'xc', None):
+        return None
+    if not (cheap._opt_gpu is mf._opt_gpu and cheap._opt_jengine is mf._opt_jengine
+            and cheap.direct_scf and mf.direct_scf
+            and cheap.direct_scf_tol == mf.direct_scf_tol):
+        return None
+    return j_own, k_own
+
+
+def _own_jk(mf, mol, dm, vx, parts, last):
+    '''J - K of the model for the reference density dm, as get_veff tags it
+    (vj, vk, ecoul): the parts the cheap model approximates are built by mf,
+    as the change from those of the last reference density (last); the others
+    are those of the cheap potential vx. None if vx does not have them.'''
+    j_own, k_own = parts
+    hybrid = mf._numint.libxc.is_hybrid_xc(mf.xc)
+    vk_x = getattr(vx, 'vk', None)
+    if hybrid and vk_x is None:
+        return None
+    dm = asarray(dm)
+    restricted = dm.ndim == 2
+    ddm = None if last.get('dm') is None else dm - last['dm']
+    ecoul = None
+    if j_own:
+        if ddm is None:
+            vj = mf.get_j(mol, dm if restricted else dm[0] + dm[1], 1)
+        else:
+            vj = mf.get_j(mol, ddm if restricted else ddm[0] + ddm[1], 1)
+            vj += last['vj']
+        last['vj'] = vj
+    else:
+        vj = asarray(vx.vj)
+        if hybrid:
+            vj = vj + asarray(vk_x)
+        ecoul = getattr(vx, 'ecoul', None)
+    if ecoul is None:
+        ecoul = float(cupy.einsum('ij,ji->', dm if restricted else dm[0] + dm[1],
+                                  vj if vj.ndim == 2 else vj[0]).real.get()) * .5
+    kpart = None
+    vhf = vj
+    if hybrid:
+        if k_own:
+            omega, alpha, hyb = mf._numint.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
+            if ddm is None:
+                vk = mf.get_k(mol, dm, 1, omega, alpha, hyb)
+            else:
+                vk = mf.get_k(mol, ddm, 1, omega, alpha, hyb)
+                vk += last['vk']
+            last['vk'] = vk
+            kpart = vk * .5 if restricted else vk
+        else:
+            kpart = asarray(vk_x)
+        vhf = vj - kpart
+    last['dm'] = dm
+    return tag_array(vhf, vj=vhf, vk=kpart, ecoul=ecoul)
 
 
 def _shares_jk(mf, cheap):
@@ -218,13 +382,22 @@ def _shares_jk(mf, cheap):
             and cheap.direct_scf_tol == mf.direct_scf_tol)
 
 
-def _veff_at_reference(mf, cheap, mol, dm, vx):
+def _veff_at_reference(mf, cheap, mol, dm, vx, last):
     '''The model's potential of the reference density dm, where the cheap
     model's potential is vx. Where the two share J and K, get_veff's
     incremental build with no change of the density takes them from vx and
-    evaluates the XC terms on the model's grids only.'''
-    if _shares_jk(mf, cheap) and getattr(vx, 'vj', None) is not None:
-        return mf.get_veff(mol, dm, dm_last=dm, vhf_last=vx)
+    evaluates the XC terms on the model's grids only. Where the cheap model
+    fits J or evaluates K seminumerically, the model builds that part, as the
+    change from its part of the last reference (last), and the other is taken
+    from vx.'''
+    if getattr(vx, 'vj', None) is not None:
+        if _shares_jk(mf, cheap):
+            return mf.get_veff(mol, dm, dm_last=dm, vhf_last=vx)
+        parts = _cheap_parts(mf, cheap)
+        if parts is not None:
+            vlast = _own_jk(mf, mol, dm, vx, parts, last)
+            if vlast is not None:
+                return mf.get_veff(mol, dm, dm_last=dm, vhf_last=vlast)
     return mf.get_veff(mol, dm)
 
 
@@ -275,9 +448,9 @@ def kernel(mf, conv_tol=1e-10, conv_tol_grad=None, dump_chk=True, dm0=None,
         log.info('Set gradient conv threshold to %g', conv_tol_grad)
 
     # The cheap model's SCF, to two_level_conv_tol. Its last cycle leaves the
-    # potential of its final density, whose J and K (and solvent terms) the
-    # first reference takes over, and its DIIS history, which the micro cycles
-    # continue.
+    # potential of its final density, from which the first reference takes
+    # over what the two models share (J, K, the solvent terms), and its DIIS
+    # history, which the micro cycles continue.
     last = {}
 
     def keep(envs):
@@ -334,11 +507,14 @@ def kernel(mf, conv_tol=1e-10, conv_tol_grad=None, dump_chk=True, dm0=None,
     e_pred = None
     e_tot = 0
     ncheap = 0
+    kref = {}
+    # a reference builds J or K, not only the XC terms
+    costly_reference = SECOND_ORDER_TEST and _cheap_parts(mf, cheap) is not None
     dv = 0
     mf.cycles = 0
     for cycle in range(mf.max_cycle):
         # a reference: the potential, energy and orbital gradient of mf itself
-        vhf = vref = _veff_at_reference(mf, cheap, mol, with_orbitals(dm), vx)
+        vhf = vref = _veff_at_reference(mf, cheap, mol, with_orbitals(dm), vx, kref)
         e_tot = mf.energy_tot(dm, h1e, vref)
         fock = mf.get_fock(h1e, s1e, vref, dm)  # = h1e + vref, no DIIS
         norm_gorb = gnorm(fock)
@@ -410,7 +586,11 @@ def kernel(mf, conv_tol=1e-10, conv_tol_grad=None, dump_chk=True, dm0=None,
             log.debug('  micro %d  E(predicted)= %.15g  delta_E= %4.3g  |g|= %4.3g',
                       micro+1, e_micro, e_micro-e_last, g)
             if abs(e_micro-e_last) < conv_tol * MICRO_ETOL and g < conv_tol_grad * MICRO_GTOL:
-                break
+                if not costly_reference:
+                    break
+                left = _energy_left(g, mo_energy, mo_occ)
+                if left == numpy.inf or left < conv_tol * MICRO_LEFT:
+                    break
         e_pred = e_micro
         vhf = None
         cput1 = log.timer('micro cycles of reference %d' % (cycle+1), *cput1)
@@ -427,5 +607,6 @@ def kernel(mf, conv_tol=1e-10, conv_tol_grad=None, dump_chk=True, dm0=None,
                          'mo_coeff': mo_coeff, 'e_tot': e_tot})
     log.info('two-level SCF: %d evaluations of the model, %d builds of the cheap one after its SCF '
              'of %d cycles', mf.cycles, ncheap, cheap.cycles)
+    mf._two_level_counts = (cheap.cycles, ncheap)
     log.timer('two-level scf_cycle', *cput0)
     return scf_conv, e_tot, mo_energy, mo_coeff, mo_occ
