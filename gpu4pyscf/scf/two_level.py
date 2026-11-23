@@ -49,9 +49,11 @@ VV10 terms on the model's grids. The energy of a part built as a change is
 put together so that the build of the change enters at second order
 (_own_jk): a build screened for a small change of the density leaves out
 more, traced with the whole density, than the build of the whole density
-does. With two_level_sgx_ref_level (off by default: an approximation) only
-the first reference builds the model's K, and the later ones take its change
-from the seminumerical K on that SGX grid, in the same form.
+does; the parts taken from the cheap potential come with their energies in
+that form through the cheap model's cycles (SCF.second_order_energy). With
+two_level_sgx_ref_level (off by default: an approximation) only the first
+reference builds the model's K, and the later ones take its change from the
+seminumerical K on that SGX grid, in the same form.
 
 The first reference is taken once the cheap model is converged to
 two_level_conv_tol (1e-5), and the DIIS history goes on across the
@@ -64,7 +66,7 @@ conv_tol (MICRO_LEFT): a reference that fails by a little costs another.
 Caffeine, wB97M-V with XC grid (99,590) and VV10 grid (50,194) in SMD water,
 on a GTX 1650 Super, the plain SCF and this one: def2-SVP 125 s and 37 s;
 def2-TZVP 367 s and 114 s (95 s with the fitted J too); def2-TZVPD 704 s
-and 223 s (169 s); the energy of the plain SCF to 2e-10 Eh, with its number
+and 223 s (169 s); the energy of the plain SCF to 2e-11 Eh, with its number
 of cycles and 2 references.
 
     >>> mf = dft.RKS(mol, xc='wb97m-v')
@@ -336,8 +338,8 @@ def _trace(a, b):
 
 def _own_jk(mf, mol, dm, vx, parts, last, k_change=None):
     '''J - K of the model for the reference density dm, as get_veff tags it
-    (vj, vk, ecoul): the parts the cheap model approximates are built by mf,
-    as the change from those of an earlier reference density (last); the
+    (vj, vk, ecoul, e2): the parts the cheap model approximates are built by
+    mf, as the change from those of an earlier reference density (last); the
     others are those of the cheap potential vx. None if vx does not have them.
 
     A part built as a change, V[D] = V[D0] + V[dD] with the change dD of the
@@ -347,11 +349,12 @@ def _own_jk(mf, mol, dm, vx, parts, last, k_change=None):
 
     where V[dD] enters at second order in dD (tr(D0 V[dD]) = tr(dD V[D0]) for
     the integrals themselves; a V[dD] screened for dD is off by more in
-    tr(D0 V[dD]) than V[D0], built in one piece, is in tr(dD V[D0])). For K
-    this is the tag e_shift: what the form adds to the exchange energy of the
-    matrix K[D0] + K[dD] of the potential returned. For J it is the tag ecoul,
-    and with K in the potential (where get_veff traces J and K together) part
-    of e_shift as well.
+    tr(D0 V[dD]) than V[D0], built in one piece, is in tr(dD V[D0])). The tag
+    e2 is tr(D (J - K/2)) / 2 of the potential returned with its parts in that
+    form, ecoul the part of J: the model's own parts as above, and those of
+    the cheap potential as its get_veff has followed them through the cycles
+    (hf._e2_of_change, with SCF.second_order_energy; the traces with the
+    summed matrices otherwise).
 
     With k_change, a function that gives a seminumerical K of a change of the
     density, only the first reference builds the model's own K, and K of every
@@ -364,8 +367,12 @@ def _own_jk(mf, mol, dm, vx, parts, last, k_change=None):
     dm = asarray(dm)
     restricted = dm.ndim == 2
     dm_tot = dm if restricted else dm[0] + dm[1]
-    ecoul = None
-    e_shift = 0
+    # the energies of the cheap potential's J and of its J - K/2, at second
+    # order through its cycles
+    e2_x = getattr(vx, 'e2', None)
+    ecoul_x = getattr(vx, 'ecoul', None)
+    if e2_x is None or ecoul_x is None:
+        e2_x = ecoul_x = None
     if j_own:
         if last.get('vj') is None:
             vj = mf.get_j(mol, dm_tot, 1)
@@ -376,26 +383,26 @@ def _own_jk(mf, mol, dm, vx, parts, last, k_change=None):
             tj = last['tj'] + 2 * _trace(ddm, last['vj']) + _trace(ddm, dj)
             vj = last['vj'] + dj
             dj = None
-            if hybrid:
-                # get_veff traces J and K of a hybrid together, tr(D (J - K/2))
-                e_shift = (tj - _trace(dm_tot, vj)) * .5
         last.update(vj=vj, jdm=dm_tot, tj=tj)
         ecoul = tj * .5
     else:
         vj = asarray(vx.vj)
         if hybrid:
             vj = vj + asarray(vk_x)
-        ecoul = getattr(vx, 'ecoul', None)
-        if ecoul is None:
+        if ecoul_x is not None:
+            ecoul = ecoul_x
+        else:
             ecoul = _trace(dm_tot, vj if vj.ndim == 2 else vj[0]) * .5
     kpart = None
     vhf = vj
+    e2 = ecoul
     if hybrid:
         if k_own:
             omega, alpha, hyb = mf._numint.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
             if last.get('vk') is None:
                 vk = mf.get_k(mol, dm, 1, omega, alpha, hyb)
-                last.update(vk=vk, kdm=dm, tk=_trace(dm, vk))
+                tk = _trace(dm, vk)
+                last.update(vk=vk, kdm=dm, tk=tk)
             else:
                 ddm = dm - last['kdm']
                 if k_change is None:
@@ -405,17 +412,21 @@ def _own_jk(mf, mol, dm, vx, parts, last, k_change=None):
                 tk = last['tk'] + 2 * _trace(ddm, last['vk']) + _trace(ddm, dk)
                 vk = last['vk'] + dk
                 dk = None
-                # E_x = -1/4 tr(D K) for restricted, -1/2 sum over the spins otherwise
-                e_shift -= (.25 if restricted else .5) * (tk - _trace(dm, vk))
                 if k_change is None:
                     # the next change is taken from this density; with k_change
                     # from the first reference's, whose K is the model's own
                     last.update(vk=vk, kdm=dm, tk=tk)
+            # E_x = -1/4 tr(D K) for restricted, -1/2 sum over the spins otherwise
+            e2 -= (.25 if restricted else .5) * tk
             kpart = vk * .5 if restricted else vk
         else:
             kpart = asarray(vk_x)
+            if e2_x is not None:
+                e2 += e2_x - ecoul_x
+            else:
+                e2 -= _trace(dm, kpart) * .5
         vhf = vj - kpart
-    return tag_array(vhf, vj=vhf, vk=kpart, ecoul=ecoul, e_shift=e_shift)
+    return tag_array(vhf, vj=vhf, vk=kpart, ecoul=ecoul, e2=e2)
 
 
 def _shares_jk(mf, cheap):
@@ -446,8 +457,12 @@ def _veff_at_reference(mf, cheap, mol, dm, vx, last, k_change=None):
             vlast = _own_jk(mf, mol, dm, vx, parts, last, k_change)
             if vlast is not None:
                 vref = mf.get_veff(mol, dm, dm_last=dm, vhf_last=vlast)
-                if vlast.e_shift:
-                    vref = tag_array(vref, exc=vref.exc + vlast.e_shift)
+                if getattr(vref, 'e2', None) is None and vlast.vk is not None:
+                    # get_veff has traced the sum of J and K with the density
+                    # (second_order_energy off): the energy of _own_jk's parts
+                    # in its place
+                    shift = vlast.e2 - _trace(asarray(dm), vlast) * .5
+                    vref = tag_array(vref, exc=vref.exc + shift)
                 return vref
     return mf.get_veff(mol, dm)
 

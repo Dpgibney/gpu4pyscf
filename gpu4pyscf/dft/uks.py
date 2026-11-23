@@ -93,6 +93,20 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
         vj = ks.get_j(mol, dm[0]+dm[1], hermi)
     vhf = vj
     ecoul = uhf._trace_ecoul(vj, dm, dm_last, vhf_last)
+    # The energy of J and K built for the change dm of the density at second
+    # order in it (hf._e2_of_change, see rks.get_veff)
+    second_order = ks.second_order_energy and ecoul is not None
+    e2 = None
+    vk_last = None
+    if vj_last is not None:
+        vk_last = getattr(vhf_last, 'vk', None)
+        if second_order and (vk_last is not None or not hybrid):
+            if hybrid:
+                j_last = asarray(vj_last[0]) + asarray(vk_last[0])
+            else:
+                j_last = asarray(vj_last)
+            ecoul = hf._e2_of_change(dm, vj, j_last, vhf_last.ecoul)
+            j_last = None
     cput2 = log.timer_debug1('vj', *t1)
 
     if hybrid:
@@ -100,15 +114,22 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
             vk = ks.get_k(mol, dm, hermi, omega, alpha, hyb)
         vhf = vj - vk
         if vj_last is not None:
+            if second_order and getattr(vhf_last, 'e2', None) is not None:
+                e2 = hf._e2_of_change(dm, vhf, asarray(vj_last), vhf_last.e2)
             vhf += asarray(vhf_last.vj)
             # the exchange part of vhf, kept apart (see rks.get_veff)
-            vk_last = getattr(vhf_last, 'vk', None)
             if vk_last is None:
                 vk = None
             else:
                 vk += asarray(vk_last)
         vxc += vhf
-        exc += float(cupy.einsum('nij,nji->', dm_orig, vhf).real.get()) * .5
+        if e2 is None:
+            e2_trace = float(cupy.einsum('nij,nji->', dm_orig, vhf).real.get()) * .5
+            exc += e2_trace
+            if second_order and vj_last is None:
+                e2 = e2_trace
+        else:
+            exc += e2
         if ecoul is not None:
             exc -= ecoul
         log.timer_debug1('vk', *cput2)
@@ -116,8 +137,10 @@ def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
         if vj_last is not None:
             vhf += asarray(vhf_last.vj)
         vxc += vhf
+        if second_order:
+            e2 = ecoul
     t0 = log.timer('veff', *t0)
-    vxc = tag_array(vxc, ecoul=ecoul, exc=exc, vj=vhf, vk=vk)
+    vxc = tag_array(vxc, ecoul=ecoul, exc=exc, vj=vhf, vk=vk, e2=e2)
     return vxc
 
 

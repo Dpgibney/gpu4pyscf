@@ -271,20 +271,22 @@ def test_two_level_reference_energy_form():
     j2 = mf.get_j(mol, d2)
     e_true = -.25 * tr(d2, k2)
     zero = cp.zeros_like(d2)
+    # a cheap potential without J and K, and without their energies at second
+    # order: what is taken from it is traced with the density
     vx = tag_array(zero, vj=zero, vk=zero, ecoul=0.)
 
     # K with a k_change that is the exact K[dD] times 1 + eps: off by
-    # eps tr(dD K[dD]) / 4, where the plain form is by eps tr(D2 K[dD]) / 4
+    # eps tr(dD K[dD]) / 4, where the trace with the sum is by eps tr(D2 K[dD]) / 4
     eps = 1e-2
     def k_change(ddm, omega, alpha, hyb):
         return mf.get_k(mol, ddm, 1, omega, alpha, hyb) * (1 + eps)
     last = {}
     v = two_level._own_jk(mf, mol, d1, vx, (False, True), last, k_change)
-    assert v.e_shift == 0
+    assert abs(v.e2 + .25 * tr(d1, 2 * v.vk)) < 1e-12
     v = two_level._own_jk(mf, mol, d2, vx, (False, True), last, k_change)
     e_plain = -.25 * tr(d2, 2 * v.vk)
     second = -.25 * eps * tr(d2 - d1, dk)
-    assert abs(e_plain + v.e_shift - e_true - second) < 1e-11
+    assert abs(v.e2 - e_true - second) < 1e-11
     assert abs(e_plain - e_true) > 100 * abs(second)
     assert abs(v.vj + v.vk).max() == 0 and v.ecoul == 0
 
@@ -293,16 +295,39 @@ def test_two_level_reference_energy_form():
     for d in (d1, d2):
         v = two_level._own_jk(mf, mol, d, vx, (False, True), last)
     assert abs(2 * v.vk - k2).max() < 1e-10
-    assert abs(-.25 * tr(d2, 2 * v.vk) + v.e_shift - e_true) < 1e-11
+    assert abs(v.e2 - e_true) < 1e-11
 
-    # the model's own J: ecoul in the form, and e_shift what takes the trace
-    # of a hybrid's J - K/2 to it
+    # the model's own J
     last = {}
     for d in (d1, d2):
         v = two_level._own_jk(mf, mol, d, vx, (True, False), last)
     assert abs(v.vj - j2).max() < 1e-10 and abs(v.vk).max() == 0
     assert abs(v.ecoul - .5 * tr(d2, j2)) < 1e-10
-    assert abs(.5 * tr(d2, v.vj) + v.e_shift - v.ecoul) < 1e-10
+    assert abs(v.e2 - v.ecoul) < 1e-12
+
+    # a cheap potential with the energies of its J (ecoul) and of its J - K/2
+    # (e2) at second order: they are those of what is taken from it
+    vx = tag_array(zero, vj=zero, vk=zero, ecoul=1.5, e2=1.25)
+    v = two_level._own_jk(mf, mol, d2, vx, (False, True), {})
+    assert v.ecoul == 1.5 and abs(v.e2 - 1.5 - e_true) < 1e-11
+    v = two_level._own_jk(mf, mol, d2, vx, (True, False), {})
+    assert abs(v.ecoul - .5 * tr(d2, j2)) < 1e-10
+    assert abs(v.e2 - v.ecoul + .25) < 1e-12
+
+@pytest.mark.parametrize('case', ['rks_b3lyp', 'rks_wb97mv_smd', 'uks_b3lyp', 'rks_pbe'])
+def test_two_level_summed_energy(case):
+    # second_order_energy off: the cheap model's J (and K, where it is the
+    # model's) traced with the density as upstream does, the model's own parts
+    # at the references in the second-order form as before
+    e_plain = _plain_energy(case)
+    charge, spin, method = CASES[case]
+    mf = method(_mol(charge, spin))
+    mf.conv_tol = 1e-10
+    mf.two_level = True
+    mf.second_order_energy = False
+    e = mf.kernel()
+    assert mf.converged
+    assert abs(e - e_plain) < 2e-9
 
 @pytest.mark.parametrize('case,dtype', [
     ('rks_b3lyp', 'double'), ('rks_b3lyp', 'float'), ('rks_wb97mv_smd', 'double'),
