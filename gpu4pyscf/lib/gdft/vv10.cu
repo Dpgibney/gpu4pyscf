@@ -942,6 +942,132 @@ static void vv10_grad_grid_response_T_kernel(double* __restrict__ T, const doubl
     }
 }
 
+// part 40: f_t of trial densities of which each is nonzero on the grid points of one atom only, the response of
+// the density on an atom's own points to its displacement: rho_t and gamma_t are [3, ngrids], the three trials
+// of the atom that a point belongs to, and f_rho_t and f_gamma_t [natoms, 3, ngrids] get the same sums as from
+// vv10_hess_eval_f_t_offdiagonal_wide_kernel and vv10_hess_eval_f_t_diagonal_kernel with the [3 natoms, ngrids]
+// arrays of these trials, added to what they hold. A thread takes a point i and an atom, and the points j of
+// that atom: every pair once, with its matrix for three trials (the 3 natoms trials of the wide kernel take
+// 3 natoms / 36 passes over all pairs, each for 36 trials).
+__global__
+static void vv10_hess_eval_f_t_by_atom_kernel(double* __restrict__ f_rho_t, double* __restrict__ f_gamma_t,
+                                              const double* __restrict__ grid_coord, const double* __restrict__ grid_weight,
+                                              const double* __restrict__ rho, const double* __restrict__ omega, const double* __restrict__ kappa,
+                                              const double* __restrict__ U, const double* __restrict__ W, const double* __restrict__ A, const double* __restrict__ B, const double* __restrict__ C,
+                                              const double* __restrict__ domega_drho, const double* __restrict__ domega_dgamma, const double* __restrict__ dkappa_drho,
+                                              const double* __restrict__ d2omega_drho2, const double* __restrict__ d2omega_dgamma2, const double* __restrict__ d2omega_drho_dgamma, const double* __restrict__ d2kappa_drho2,
+                                              const double* __restrict__ rho_t, const double* __restrict__ gamma_t,
+                                              const int* __restrict__ grid_offsets_of_atom,
+                                              const int ngrids, const int natoms)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j_atom = blockIdx.y;
+    if (i >= ngrids || j_atom >= natoms)
+        return;
+
+    const double omega_i = omega[i];
+    const double kappa_i = kappa[i];
+    const double3 r_i = { grid_coord[i * 3 + 0], grid_coord[i * 3 + 1], grid_coord[i * 3 + 2] };
+
+    const double rho_i = rho[i];
+    const double domega_drho_i = domega_drho[i];
+    const double domega_dgamma_i = domega_dgamma[i];
+    const double dkappa_drho_i = dkappa_drho[i];
+
+    double f_rho_t_i[3] {0, 0, 0};
+    double f_gamma_t_i[3] {0, 0, 0};
+
+    const int j_start = grid_offsets_of_atom[j_atom];
+    const int j_end = grid_offsets_of_atom[j_atom + 1];
+
+    for (int j = j_start; j < j_end; j++) {
+        const double omega_j = omega[j];
+        const double kappa_j = kappa[j];
+        const double3 r_j = { grid_coord[j * 3 + 0], grid_coord[j * 3 + 1], grid_coord[j * 3 + 2] };
+        const double rho_j = rho[j];
+
+        const double domega_drho_j = domega_drho[j];
+        const double domega_dgamma_j = domega_dgamma[j];
+        const double dkappa_drho_j = dkappa_drho[j];
+
+        const double r_ij2 = (r_i.x - r_j.x) * (r_i.x - r_j.x) + (r_i.y - r_j.y) * (r_i.y - r_j.y) + (r_i.z - r_j.z) * (r_i.z - r_j.z);
+        const double g_ij = omega_i * r_ij2 + kappa_i;
+        const double g_ji = omega_j * r_ij2 + kappa_j;
+        const double g_sum = g_ij + g_ji;
+        const double g_ij_ji_sum_1 = 1 / (g_ij * g_ji * g_sum);
+        const double Phi_ij = -g_ij_ji_sum_1; // Prefactor of 1.5 is applied later
+        const double g_ij_ji_1 = g_sum * g_ij_ji_sum_1;
+        const double g_ij_1 = g_ji * g_ij_ji_1;
+        const double g_ji_1 = g_ij * g_ij_ji_1;
+        const double g_sum_1 = g_ij * g_ji * g_ij_ji_sum_1;
+
+        const double rho_dgdrho_i = rho_i * (r_ij2 * domega_drho_i + dkappa_drho_i);
+        const double rho_dgdrho_j = rho_j * (r_ij2 * domega_drho_j + dkappa_drho_j);
+        const double d2Phi_dgij_dgji_over_Phi = 2 * (g_sum_1 * g_sum_1 + g_ij_ji_1);
+
+        // the pair matrix times w_j, as in the wide kernel
+        const double weight_j = grid_weight[j];
+        const double w_Phi_ij = weight_j * Phi_ij;
+        const double f_rho_rho_ij = w_Phi_ij * (rho_dgdrho_i * rho_dgdrho_j * d2Phi_dgij_dgji_over_Phi
+                                                - rho_dgdrho_i * (g_sum_1 + g_ij_1)
+                                                - rho_dgdrho_j * (g_sum_1 + g_ji_1) + 1);
+        const double rho_domegadgamma_i_rij2 = rho_i * domega_dgamma_i * r_ij2;
+        const double f_gamma_rho_ij = rho_domegadgamma_i_rij2 * w_Phi_ij * (rho_dgdrho_j * d2Phi_dgij_dgji_over_Phi - (g_sum_1 + g_ij_1));
+        const double rho_domegadgamma_j_rij2 = rho_j * domega_dgamma_j * r_ij2;
+        const double f_rho_gamma_ij = rho_domegadgamma_j_rij2 * w_Phi_ij * (rho_dgdrho_i * d2Phi_dgij_dgji_over_Phi - (g_sum_1 + g_ji_1));
+        const double f_gamma_gamma_ij = rho_domegadgamma_i_rij2 * rho_domegadgamma_j_rij2 * w_Phi_ij * d2Phi_dgij_dgji_over_Phi;
+
+        #pragma unroll
+        for (int d = 0; d < 3; d++) {
+            const double   rho_t_j =   rho_t[d * ngrids + j];
+            const double gamma_t_j = gamma_t[d * ngrids + j];
+            f_rho_t_i  [d] = fma(  f_rho_rho_ij, rho_t_j, fma(  f_rho_gamma_ij, gamma_t_j,   f_rho_t_i[d]));
+            f_gamma_t_i[d] = fma(f_gamma_rho_ij, rho_t_j, fma(f_gamma_gamma_ij, gamma_t_j, f_gamma_t_i[d]));
+        }
+    }
+
+    #pragma unroll
+    for (int d = 0; d < 3; d++) {
+        f_rho_t_i  [d] *= 1.5;
+        f_gamma_t_i[d] *= 1.5;
+    }
+
+    if (j_start <= i && i < j_end) {
+        // the trials of the point's own atom: the terms of the diagonal kernel
+        const double U_i = U[i];
+        const double W_i = W[i];
+        const double A_i = A[i];
+        const double B_i = B[i];
+        const double C_i = C[i];
+        const double d2omega_drho2_i = d2omega_drho2[i];
+        const double d2omega_dgamma2_i = d2omega_dgamma2[i];
+        const double d2omega_drho_dgamma_i = d2omega_drho_dgamma[i];
+        const double d2kappa_drho2_i = d2kappa_drho2[i];
+
+        const double f_rho_rho_ii = 2 * domega_drho_i * W_i + 2 * dkappa_drho_i * U_i
+                                    + rho_i * (d2omega_drho2_i * W_i + d2kappa_drho2_i * U_i + dkappa_drho_i * dkappa_drho_i * A_i
+                                               + domega_drho_i * domega_drho_i * C_i + 2 * domega_drho_i * dkappa_drho_i * B_i);
+        const double f_gamma_rho_ii = domega_dgamma_i * W_i + rho_i * (d2omega_drho_dgamma_i * W_i
+                                                                       + domega_dgamma_i * (dkappa_drho_i * B_i + domega_drho_i * C_i));
+        const double f_rho_gamma_ii = f_gamma_rho_ii;
+        const double f_gamma_gamma_ii = rho_i * (d2omega_dgamma2_i * W_i + domega_dgamma_i * domega_dgamma_i * C_i);
+
+        #pragma unroll
+        for (int d = 0; d < 3; d++) {
+            const double rho_t_i   =   rho_t[d * ngrids + i];
+            const double gamma_t_i = gamma_t[d * ngrids + i];
+            f_rho_t_i  [d] += (  f_rho_rho_ii * rho_t_i +   f_rho_gamma_ii * gamma_t_i);
+            f_gamma_t_i[d] += (f_gamma_rho_ii * rho_t_i + f_gamma_gamma_ii * gamma_t_i);
+        }
+    }
+
+    #pragma unroll
+    for (int d = 0; d < 3; d++) {
+        f_rho_t  [((size_t)j_atom * 3 + d) * ngrids + i] += f_rho_t_i  [d];
+        f_gamma_t[((size_t)j_atom * 3 + d) * ngrids + i] += f_gamma_t_i[d];
+    }
+}
+
 extern "C" {
 // VV10 gradient, the grid response's pair term (part 28): T (3 x ngrids, zeroed here) with T_j = sum over the
 // points i on other atoms of K_ij (r_i - r_j); the term for atom B is 3 sum_{j on B} T_j
@@ -1129,6 +1255,34 @@ int VXC_vv10nlc_hess_eval_f_t(const cudaStream_t stream,
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA Error of vv10 hess eval_f_t: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+    return 0;
+}
+
+__host__
+int VXC_vv10nlc_hess_eval_f_t_by_atom(const cudaStream_t stream,
+                                      double* f_rho_t, double* f_gamma_t,
+                                      const double* grid_coord, const double* grid_weight,
+                                      const double* rho, const double* omega, const double* kappa,
+                                      const double* U, const double* W, const double* A, const double* B, const double* C,
+                                      const double* domega_drho, const double* domega_dgamma, const double* dkappa_drho,
+                                      const double* d2omega_drho2, const double* d2omega_dgamma2, const double* d2omega_drho_dgamma, const double* d2kappa_drho2,
+                                      const double* rho_t, const double* gamma_t,
+                                      const int* grid_offsets_of_atom,
+                                      const int ngrids, const int natm)
+{
+    const dim3 threads(NG_PER_BLOCK, 1);
+    const dim3 blocks((ngrids + NG_PER_BLOCK - 1) / NG_PER_BLOCK, natm);
+    vv10_hess_eval_f_t_by_atom_kernel<<<blocks, threads, 0, stream>>>(
+        f_rho_t, f_gamma_t, grid_coord, grid_weight, rho, omega, kappa,
+        U, W, A, B, C,
+        domega_drho, domega_dgamma, dkappa_drho,
+        d2omega_drho2, d2omega_dgamma2, d2omega_drho_dgamma, d2kappa_drho2,
+        rho_t, gamma_t, grid_offsets_of_atom, ngrids, natm);
+    const cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error of vv10 hess eval_f_t_by_atom: %s\n", cudaGetErrorString(err));
         return 1;
     }
     return 0;
