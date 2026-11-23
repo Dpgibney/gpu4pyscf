@@ -109,11 +109,43 @@ def get_veff(mf, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
         vhf = mf.get_k(mol, ddm, hermi)
     vhf *= -.5
     vhf += vj
+    e2 = None
+    if mf.second_order_energy and ecoul is not None:
+        if dm_last is None:
+            e2 = _trace(ddm, vhf) * .5
+        elif getattr(vhf_last, 'e2', None) is not None:
+            e2 = _e2_of_change(ddm, vhf, cupy.asarray(vhf_last), vhf_last.e2)
     if dm_last is not None:
         vhf += cupy.asarray(vhf_last)
     if ecoul is not None:
         vhf = tag_array(vhf, ecoul=ecoul)
+        if e2 is not None:
+            # energy_elec traces vhf with the density it is given: what the
+            # form adds to that trace for the density of this potential
+            e2_shift = 0.
+            if dm_last is not None:
+                e2_shift = e2 - _trace(ddm + dm_last, vhf) * .5
+            vhf = tag_array(vhf, e2=e2, e2_shift=e2_shift)
     return vhf
+
+def _trace(a, b):
+    '''tr(a b), summed over the spins of [2,nao,nao] arrays'''
+    return float(cupy.einsum('...ij,...ji->...', a, b).real.sum().get())
+
+def _e2_of_change(ddm, dv, v_last, e2_last):
+    '''The two-electron energy tr(D V)/2 of a potential that is built as a
+    change: V = v_last + dv for the density D = D_last + ddm, with dv built for
+    ddm and e2_last = tr(D_last v_last)/2:
+
+        tr(D V)/2 = e2_last + tr(ddm v_last) + tr(ddm dv)/2
+
+    (tr(D_last dv) = tr(ddm v_last) for the integrals themselves). A build for
+    a small change of the density is screened for that change, and what it
+    leaves out, harmless in the Fock matrix, is here traced with ddm; traced
+    with the whole density, as in tr(D (v_last + dv))/2 with the potential
+    summed over the SCF cycles, it adds up to 1e-10 Eh for 600 basis functions
+    at direct_scf_tol 1e-13 (SCF.second_order_energy).'''
+    return e2_last + _trace(ddm, v_last) + _trace(ddm, dv) * .5
 
 def _trace_ecoul(vj, ddm, dm_last=None, vhf_last=None):
     ecoul = None
@@ -202,6 +234,8 @@ def energy_elec(mf, dm=None, h1e=None, vhf=None):
         vhf = mf.get_veff(mf.mol, dm)
     e1 = cupy.einsum('ij,ji->', h1e, dm).real.item()
     e2 = cupy.einsum('ij,ji->', vhf, dm).real.item() * .5
+    if getattr(mf, 'second_order_energy', False):
+        e2 += getattr(vhf, 'e2_shift', 0.)
     ecoul = vhf.ecoul.real
     exx = e2 - ecoul
     mf.scf_summary['e1'] = e1
@@ -1004,6 +1038,16 @@ class SCF(pyscf_lib.StreamObject):
     level_shift         = None
     direct_scf          = hf_cpu.SCF.direct_scf
     direct_scf_tol      = hf_cpu.SCF.direct_scf_tol
+    # The two-electron energy of a direct SCF, whose J and K are built for the
+    # change of the density of each cycle and summed. True: each build enters
+    # at second order in that change (_e2_of_change). False: the summed
+    # potential is traced with the density, as upstream does; then what the
+    # screening of each build leaves out is traced with the whole density, and
+    # the energy is up to 1e-10 Eh (600 basis functions, direct_scf_tol 1e-13)
+    # from that of one build of the potential of the same density, against
+    # about 1e-11 Eh with True. The Fock matrices, the orbitals and the
+    # densities of the cycles are the same either way.
+    second_order_energy = getattr(__config__, 'scf_hf_SCF_second_order_energy', True)
     # Build J and K of HF and global hybrids in one Rys pass instead of the MD J-engine plus a K-only
     # Rys pass. Exact. Faster where the K-only pass's exchange screening gains little (small and medium
     # molecules); off by default.
@@ -1049,7 +1093,7 @@ class SCF(pyscf_lib.StreamObject):
         'conv_tol', 'conv_tol_grad', 'conv_tol_cpscf', 'max_cycle', 'init_guess',
         'sap_basis', 'DIIS', 'diis', 'diis_space', 'diis_damp', 'diis_start_cycle',
         'diis_file', 'diis_space_rollback', 'damp', 'level_shift',
-        'direct_scf', 'direct_scf_tol', 'jk_one_pass', 'conv_check', 'callback',
+        'direct_scf', 'direct_scf_tol', 'second_order_energy', 'jk_one_pass', 'conv_check', 'callback',
         'two_level', 'two_level_scf', 'two_level_grids_level', 'two_level_nlcgrids_level',
         'two_level_conv_tol', 'two_level_micro_cycles', 'two_level_sgx_level',
         'two_level_sgx_dtype', 'two_level_auxbasis', 'two_level_sgx_ref_level',
@@ -1162,6 +1206,7 @@ class SCF(pyscf_lib.StreamObject):
         log.info('direct_scf = %s', self.direct_scf)
         if self.direct_scf:
             log.info('direct_scf_tol = %g', self.direct_scf_tol)
+            log.info('second_order_energy = %s', self.second_order_energy)
         if self.jk_one_pass:
             log.info('jk_one_pass = %s', self.jk_one_pass)
         if self.two_level:

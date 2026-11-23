@@ -140,6 +140,8 @@ def energy_elec(mf, dm=None, h1e=None, vhf=None):
     e2 = cupy.einsum('nij,nji->', vhf, dm) * .5
     e1 = float(e1.real.get())
     e2 = float(e2.real.get())
+    if getattr(mf, 'second_order_energy', False):
+        e2 += getattr(vhf, 'e2_shift', 0.)
     e_elec = e1 + e2
     ecoul = vhf.ecoul.real
     exx = e2 - ecoul
@@ -420,10 +422,22 @@ class UHF(hf.SCF):
             vhf = self.get_k(mol, ddm, hermi)
         vhf *= -1
         vhf += vj
+        # the energy of the build of a change at second order: hf._e2_of_change
+        e2 = None
+        if self.second_order_energy and ecoul is not None:
+            if dm_last is None:
+                e2 = hf._trace(ddm, vhf) * .5
+            elif getattr(vhf_last, 'e2', None) is not None:
+                e2 = hf._e2_of_change(ddm, vhf, cupy.asarray(vhf_last), vhf_last.e2)
         if dm_last is not None:
             vhf += cupy.asarray(vhf_last)
         if ecoul is not None:
             vhf = tag_array(vhf, ecoul=ecoul)
+            if e2 is not None:
+                e2_shift = 0.
+                if dm_last is not None:
+                    e2_shift = e2 - hf._trace(dm, vhf) * .5
+                vhf = tag_array(vhf, e2=e2, e2_shift=e2_shift)
         return vhf
 
     def spin_square(self, mo_coeff=None, s=None):
