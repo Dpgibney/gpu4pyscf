@@ -171,6 +171,84 @@ class KnownValues(unittest.TestCase):
         assert numpy.linalg.norm(e1_cpu[0] - e1_gpu[0].get()) < 1e-6
         assert numpy.linalg.norm(e1_cpu[1] - e1_gpu[1].get()) < 1e-6
 
+    def test_cphf_residual(self):
+        # solve_residual: the solution of the Krylov solver at a tight
+        # tolerance, and a residual below the tolerance it is given
+        mf = scf.RHF(mol)
+        mf.kernel()
+        mo_energy = mf.mo_energy
+        mo_coeff = mf.mo_coeff
+        mo_occ = mf.mo_occ
+        fx = gen_vind_cpu_rhf(mf, mo_coeff, mo_occ)
+        hessobj = mf.Hessian()
+        h1ao = hessobj.make_h1(mo_coeff, mo_occ)
+        s1a = -mol.intor('int1e_ipovlp', comp=3)
+        mocc = mo_coeff[:, mo_occ > 0]
+        h1vo = numpy.vstack([_ao2mo(h1ao[i], mo_coeff, mocc) for i in range(mol.natm)])
+        s1vo = numpy.vstack([_ao2mo(s1a, mo_coeff, mocc) for i in range(mol.natm)])
+        calls = []
+
+        def fx_gpu(mo1):
+            calls.append(len(mo1))
+            return cupy.asarray(fx(mo1.get()))
+
+        mo_energy = cupy.asarray(mo_energy)
+        mo_occ = cupy.asarray(mo_occ)
+        h1vo = cupy.asarray(h1vo)
+        s1vo = cupy.asarray(s1vo)
+        mo1_ref, e1_ref = cphf_gpu.solve(fx_gpu, mo_energy, mo_occ, h1vo, s1vo, tol=1e-11)
+        nset, nmo, nocc = h1vo.shape
+        vir = mo_occ == 0
+        e_ai = mo_energy[vir][:,None] - mo_energy[~vir]
+        hs = h1vo - s1vo * mo_energy[~vir]
+
+        def residual(mo1):
+            r = hs + fx_gpu(mo1).reshape(nset,nmo,nocc)
+            r = (r[:,vir] + mo1[:,vir] * e_ai) / e_ai
+            return float(cupy.linalg.norm(r.reshape(nset,-1), axis=1).max())
+
+        for tol, scale, err in ((1e-9, False, 1e-7), (1e-4, False, 1e-3), (1e-4, True, 1e-3)):
+            del calls[:]
+            mo1, e1 = cphf_gpu.solve_residual(fx_gpu, mo_energy, mo_occ, h1vo, s1vo,
+                                              tol=tol, scale_trials=scale)
+            # the response of the uncoupled solution and of each cycle's trial
+            # vectors, none after the solve
+            assert calls[0] == nset and all(n <= nset for n in calls)
+            assert abs(mo1 - mo1_ref).max() < err
+            assert abs(e1 - e1_ref).max() < err
+            assert residual(mo1) < tol * 2
+
+    def test_ucphf_residual(self):
+        mf = scf.UHF(mol)
+        mf.kernel()
+        mo_energy = mf.mo_energy
+        mo_coeff = mf.mo_coeff
+        mo_occ = mf.mo_occ
+        fx = gen_vind_cpu(mf, mf.mo_coeff, mf.mo_occ)
+        hessobj = mf.Hessian()
+        h1ao = hessobj.make_h1(mo_coeff, mo_occ)
+        s1a = -mol.intor('int1e_ipovlp', comp=3)
+        mocc = [mo_coeff[k][:,mo_occ[k] > 0] for k in range(2)]
+        h1vo = [numpy.vstack([_ao2mo(h1ao[k][i], mo_coeff[k], mocc[k]) for i in range(mol.natm)])
+                for k in range(2)]
+        s1vo = [numpy.vstack([_ao2mo(s1a, mo_coeff[k], mocc[k]) for i in range(mol.natm)])
+                for k in range(2)]
+
+        def fx_gpu(mo1):
+            return cupy.asarray(fx(mo1.get()))
+
+        mo_energy = cupy.asarray(mo_energy)
+        mo_occ = cupy.asarray(mo_occ)
+        h1vo = [cupy.asarray(x) for x in h1vo]
+        s1vo = [cupy.asarray(x) for x in s1vo]
+        mo1_ref, e1_ref = ucphf_gpu.solve(fx_gpu, mo_energy, mo_occ, h1vo, s1vo, tol=1e-11)
+        for tol, scale, err in ((1e-9, False, 1e-7), (1e-4, True, 1e-3)):
+            mo1, e1 = ucphf_gpu.solve_residual(fx_gpu, mo_energy, mo_occ, h1vo, s1vo,
+                                               tol=tol, scale_trials=scale)
+            for k in range(2):
+                assert abs(mo1[k] - mo1_ref[k]).max() < err
+                assert abs(e1[k] - e1_ref[k]).max() < err
+
 if __name__ == "__main__":
     print("Full Tests for CPHF/UCPHF")
     unittest.main()

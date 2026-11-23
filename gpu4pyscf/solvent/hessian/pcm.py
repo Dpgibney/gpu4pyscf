@@ -628,6 +628,231 @@ def get_dD_dot_q(dD, q, atmlst, gridslice, ngrids):
 def get_dDT_dot_q(dD, q, atmlst, gridslice, ngrids):
     return get_dD_dot_q(-dD.transpose(0,2,1), q, atmlst, gridslice, ngrids)
 
+_SURFACE_KERNEL_CODE = r'''
+#define SQRT_PI 1.7724538509055160272981674833411
+
+// out[a,d,i] = sum_{j in the grid points of atom a} dD[d,i,j] q[j], or with
+// transpose dD[d,j,i] q[j]; dD[d,i,j] is the derivative of D_ij with respect
+// to the position of point i (the off-diagonal elements, as _pcm_left_multiply_dD
+// of lib/solvent/pcm.cu has them, with the normal vector of point i for the
+// transpose).
+extern "C" __global__
+void pcm_dD_dot_q_by_atom(double* __restrict__ out, const double* __restrict__ q,
+        const double* __restrict__ coords, const double* __restrict__ charge_exp,
+        const double* __restrict__ norm_vec, const int* __restrict__ gridslice,
+        const int n, const int transpose)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int a = blockIdx.y;
+    if (i >= n) {
+        return;
+    }
+    const int j0 = gridslice[2*a];
+    const int j1 = gridslice[2*a+1];
+    const double xi = coords[3*i];
+    const double yi = coords[3*i+1];
+    const double zi = coords[3*i+2];
+    const double ei = charge_exp[i];
+    const double nxi = norm_vec[3*i];
+    const double nyi = norm_vec[3*i+1];
+    const double nzi = norm_vec[3*i+2];
+
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    double sum_z = 0.0;
+    for (int j = j0; j < j1; ++j) {
+        const double ej = charge_exp[j];
+        const double xi_ij = ei * ej * rsqrt(ei*ei + ej*ej);
+        const double dx = xi - coords[3*j];
+        const double dy = yi - coords[3*j+1];
+        const double dz = zi - coords[3*j+2];
+        const double rij = sqrt(dx*dx + dy*dy + dz*dz);
+
+        const double xi_r_ij = xi_ij * rij;
+        const double xi2_r2_ij = xi_r_ij * xi_r_ij;
+        const double rij_1 = (rij < 1e-14) ? 0.0 : 1.0/rij; // This handles i == j case
+        const double rij_2 = rij_1 * rij_1;
+        const double exp_term = exp(-xi2_r2_ij);
+
+        const double dS_dr = -(erf(xi_r_ij) - (2.0/SQRT_PI) * xi_r_ij * exp_term) * rij_2;
+        const double dx_rij = dx * rij_1;
+        const double dy_rij = dy * rij_1;
+        const double dz_rij = dz * rij_1;
+
+        const double nxj = transpose ? nxi : norm_vec[3*j];
+        const double nyj = transpose ? nyi : norm_vec[3*j+1];
+        const double nzj = transpose ? nzi : norm_vec[3*j+2];
+        const double nj_rij = dx*nxj + dy*nyj + dz*nzj;
+        const double rij_3 = rij_1 * rij_2;
+        const double xi3_r3_ij = xi2_r2_ij * xi_ij;
+        const double dD_dri = (4.0/SQRT_PI) * xi3_r3_ij * exp_term * nj_rij * rij_3;
+
+        const double nj_rij_over_rij2 = 3.0 * nj_rij * rij_2;
+        const double qj = q[j];
+        sum_x += (dD_dri * dx_rij + dS_dr * (-nxj * rij_1 + nj_rij_over_rij2 * dx_rij)) * qj;
+        sum_y += (dD_dri * dy_rij + dS_dr * (-nyj * rij_1 + nj_rij_over_rij2 * dy_rij)) * qj;
+        sum_z += (dD_dri * dz_rij + dS_dr * (-nzj * rij_1 + nj_rij_over_rij2 * dz_rij)) * qj;
+    }
+    out[((size_t)a * 3    ) * n + i] = sum_x;
+    out[((size_t)a * 3 + 1) * n + i] = sum_y;
+    out[((size_t)a * 3 + 2) * n + i] = sum_z;
+}
+
+// out[c,a,i] = left[i] sum_{j in the grid points of atom a} d2D[c,i,j] right[j],
+// c = 3 x + y: the second derivatives of D_ij with respect to the position of
+// point i (the off-diagonal elements, as _pcm_d2D_d2S of lib/solvent/pcm.cu
+// has them).
+extern "C" __global__
+void pcm_d2D_sandwich_by_atom(double* __restrict__ out, const double* __restrict__ left,
+        const double* __restrict__ right, const double* __restrict__ coords,
+        const double* __restrict__ charge_exp, const double* __restrict__ norm_vec,
+        const int* __restrict__ gridslice, const int n, const int natm)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int a = blockIdx.y;
+    if (i >= n) {
+        return;
+    }
+    const int j0 = gridslice[2*a];
+    const int j1 = gridslice[2*a+1];
+    const double xi = coords[3*i];
+    const double yi = coords[3*i+1];
+    const double zi = coords[3*i+2];
+    const double ei = charge_exp[i];
+
+    double s[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    for (int j = j0; j < j1; ++j) {
+        const double ej = charge_exp[j];
+        const double eij = ei * ej * rsqrt(ei*ei + ej*ej);
+
+        const double dx = xi - coords[3*j];
+        const double dy = yi - coords[3*j+1];
+        const double dz = zi - coords[3*j+2];
+        const double rij = sqrt(dx*dx + dy*dy + dz*dz);
+        const double rij_1 = (i != j) ? (1.0 / rij) : 0.0; // This guarantees that if i == j, all matrix elements = 0
+        const double rij_2 = rij_1 * rij_1;
+        const double rij_3 = rij_2 * rij_1;
+        const double rij_4 = rij_2 * rij_2;
+        const double rij_5 = rij_2 * rij_3;
+        const double eij2 = eij * eij;
+
+        const double eij_rij = eij * rij;
+        const double erf_eij_rij = erf(eij_rij);
+        const double exp_minus_eij2_rij2 = exp(-eij_rij * eij_rij);
+        const double two_eij_over_sqrt_pi = 2.0 * eij / SQRT_PI;
+        const double two_eij_over_sqrt_pi_exp_minus_eij2_rij2 = exp_minus_eij2_rij2 * two_eij_over_sqrt_pi;
+
+        const double S_direct_product_prefactor = -two_eij_over_sqrt_pi_exp_minus_eij2_rij2 * (3 * rij_4 + 2 * eij2 * rij_2)
+                                                  + 3 * rij_5 * erf_eij_rij;
+
+        const double nxj = norm_vec[3*j];
+        const double nyj = norm_vec[3*j+1];
+        const double nzj = norm_vec[3*j+2];
+        const double nj_rij = dx * nxj + dy * nyj + dz * nzj;
+
+        const double eij4 = eij2 * eij2;
+        const double rij_6 = rij_4 * rij_2;
+        const double rij_7 = rij_4 * rij_3;
+
+        const double D_direct_product_prefactor = (-two_eij_over_sqrt_pi_exp_minus_eij2_rij2 * (15 * rij_6 + 10 * eij2 * rij_4 + 4 * eij4 * rij_2)
+                                                   + 15 * rij_7 * erf_eij_rij) * nj_rij;
+        const double w = right[j];
+        s[0] += w * (D_direct_product_prefactor * dx * dx - S_direct_product_prefactor * (dx * nxj + dx * nxj + nj_rij));
+        s[1] += w * (D_direct_product_prefactor * dx * dy - S_direct_product_prefactor * (dy * nxj + dx * nyj));
+        s[2] += w * (D_direct_product_prefactor * dx * dz - S_direct_product_prefactor * (dz * nxj + dx * nzj));
+        s[3] += w * (D_direct_product_prefactor * dy * dx - S_direct_product_prefactor * (dx * nyj + dy * nxj));
+        s[4] += w * (D_direct_product_prefactor * dy * dy - S_direct_product_prefactor * (dy * nyj + dy * nyj + nj_rij));
+        s[5] += w * (D_direct_product_prefactor * dy * dz - S_direct_product_prefactor * (dz * nyj + dy * nzj));
+        s[6] += w * (D_direct_product_prefactor * dz * dx - S_direct_product_prefactor * (dx * nzj + dz * nxj));
+        s[7] += w * (D_direct_product_prefactor * dz * dy - S_direct_product_prefactor * (dy * nzj + dz * nyj));
+        s[8] += w * (D_direct_product_prefactor * dz * dz - S_direct_product_prefactor * (dz * nzj + dz * nzj + nj_rij));
+    }
+    const double l = left[i];
+    for (int c = 0; c < 9; ++c) {
+        out[((size_t)c * natm + a) * n + i] = l * s[c];
+    }
+}
+'''
+
+_surface_kernels = {}
+def _surface_kernel(name):
+    if name not in _surface_kernels:
+        _surface_kernels[name] = cupy.RawKernel(_SURFACE_KERNEL_CODE, name, options=('-std=c++17',))
+    return _surface_kernels[name]
+
+def _dD_dot_q_by_atom(surface, q, gridslice, transpose=False):
+    '''[natm,3,ngrids]: sum_j dD[d,i,j] q[j] over the grid points j of each
+    atom (dD[d,j,i] q[j] with transpose), dD the derivative of D with respect
+    to the position of its first point, evaluated from the surface data'''
+    grid_coords = cupy.ascontiguousarray(surface['grid_coords'])
+    charge_exp = cupy.ascontiguousarray(surface['charge_exp'])
+    norm_vec = cupy.ascontiguousarray(surface['norm_vec'])
+    n = charge_exp.shape[0]
+    assert q.size == n
+    gs = cupy.asarray(gridslice, dtype=cupy.int32, order='C')
+    natm = gs.shape[0]
+    out = cupy.empty((natm, 3, n))
+    nthread = 128
+    _surface_kernel('pcm_dD_dot_q_by_atom')(
+        ((n + nthread - 1) // nthread, natm), (nthread,),
+        (out, cupy.ascontiguousarray(q, dtype=cupy.float64), grid_coords, charge_exp,
+         norm_vec, gs, numpy.int32(n), numpy.int32(bool(transpose))))
+    return out
+
+def get_dD_dot_q_lowmem(surface, q, atmlst, gridslice):
+    '''get_dD_dot_q without the matrix dD [3,ngrids,ngrids]'''
+    natm = len(gridslice)
+    assert list(atmlst) == list(range(natm))
+    by_atom = _dD_dot_q_by_atom(surface, q, gridslice)
+    dDq = by_atom.sum(axis=0)
+    output = -by_atom
+    for i_atom in atmlst:
+        g0,g1 = gridslice[i_atom]
+        output[i_atom, :, g0:g1] += dDq[:, g0:g1]
+    return output
+
+def get_dDT_dot_q_lowmem(surface, q, atmlst, gridslice):
+    '''get_dDT_dot_q without the matrix dD [3,ngrids,ngrids]'''
+    natm = len(gridslice)
+    assert list(atmlst) == list(range(natm))
+    output = _dD_dot_q_by_atom(surface, q, gridslice, transpose=True)
+    dDTq = output.sum(axis=0)
+    for i_atom in atmlst:
+        g0,g1 = gridslice[i_atom]
+        output[i_atom, :, g0:g1] -= dDTq[:, g0:g1]
+    return output
+
+def contract_d2D_offdiagonal(surface, left_vector, right_vector, gridslice, transpose=False):
+    '''get_v_dot_d2D_dot_q (get_v_dot_d2DT_dot_q with transpose) without the
+    matrix d2D [3,3,ngrids,ngrids]'''
+    if transpose:
+        # v d2D^T q = q d2D v, with the atoms of the two points exchanged
+        left_vector, right_vector = right_vector, left_vector
+    grid_coords = cupy.ascontiguousarray(surface['grid_coords'])
+    charge_exp = cupy.ascontiguousarray(surface['charge_exp'])
+    norm_vec = cupy.ascontiguousarray(surface['norm_vec'])
+    n = charge_exp.shape[0]
+    assert left_vector.size == n
+    assert right_vector.size == n
+    gs = cupy.asarray(gridslice, dtype=cupy.int32, order='C')
+    natm = gs.shape[0]
+    tmp = cupy.empty((9, natm, n))
+    nthread = 128
+    _surface_kernel('pcm_d2D_sandwich_by_atom')(
+        ((n + nthread - 1) // nthread, natm), (nthread,),
+        (tmp, cupy.ascontiguousarray(left_vector, dtype=cupy.float64),
+         cupy.ascontiguousarray(right_vector, dtype=cupy.float64), grid_coords, charge_exp,
+         norm_vec, gs, numpy.int32(n), numpy.int32(natm)))
+    # [atom of the left point, atom of the right point, 3, 3]
+    sandwiched = cupy.stack([tmp[:, :, g0:g1].sum(axis=2) for g0,g1 in gridslice])
+    sandwiched = sandwiched.transpose(0,2,1).reshape(natm, natm, 3, 3)
+    if transpose:
+        sandwiched = sandwiched.transpose(1,0,2,3)
+    output = -(sandwiched + sandwiched.transpose(1,0,2,3))
+    idx = cupy.arange(natm)
+    output[idx, idx] += sandwiched.sum(axis=1) + sandwiched.sum(axis=0)
+    return output
+
 def get_v_dot_d2S_dot_q(d2S, d2Sii, v_left, q_right, natom, gridslice):
     output = d2Sii @ (v_left * q_right)
     for i_atom in range(natom):
@@ -659,6 +884,82 @@ def get_v_dot_d2D_dot_q(d2D, v_left, q_right, natom, gridslice):
     return output
 def get_v_dot_d2DT_dot_q(d2D, v_left, q_right, natom, gridslice):
     return get_v_dot_d2D_dot_q(d2D.transpose(0,1,3,2), v_left, q_right, natom, gridslice)
+
+# The part of the available memory that the matrices of the derivatives of D
+# and S may take (dD, dS [3,ngrids,ngrids]; d2D, d2S [3,3,ngrids,ngrids]) in
+# the IEF-PCM and SMD terms; beyond it their products with vectors are taken
+# from the surface data (0: always)
+DENSE_DERIVATIVE_MEMORY_FRACTION = .8
+
+def _dDT_dot_q(dD, q, atmlst, gridslice, ngrids):
+    '''get_dDT_dot_q without the copy of -dD^T that it makes (as large as dD)'''
+    output = cupy.zeros([len(atmlst), 3, ngrids])
+    for i_atom in atmlst:
+        g0,g1 = gridslice[i_atom]
+        if g0 == g1:
+            continue
+        output[i_atom, :, g0:g1] -= contract('dji,j->di', dD[:,:,g0:g1], q)
+        output[i_atom, :, :] += contract('dji,j->di', dD[:,g0:g1,:], q[g0:g1])
+    return output
+
+def _first_derivative_products(pcmobj, dSii, atmlst, gridslice):
+    '''get_dS_dot_q, get_dD_dot_q and get_dDT_dot_q of the surface of pcmobj as
+    functions of the vector: from the matrices dS and dD [3,ngrids,ngrids]
+    where the two fit in memory, from the surface data otherwise.'''
+    surface = pcmobj.surface
+    ngrids = surface['charge_exp'].shape[0]
+    required = 2 * 3 * ngrids**2 * 8
+    dD = dS = None
+    if required <= get_avail_mem() * DENSE_DERIVATIVE_MEMORY_FRACTION:
+        try:
+            dD, dS = get_dD_dS(surface, with_D=True, with_S=True)
+        except cupy.cuda.memory.OutOfMemoryError:
+            dD = dS = None
+    if dD is None:
+        def dS_dot(x):
+            return get_dS_dot_q_lowmem(dSii, surface, x, atmlst, gridslice)
+        def dD_dot(x):
+            return get_dD_dot_q_lowmem(surface, x, atmlst, gridslice)
+        def dDT_dot(x):
+            return get_dDT_dot_q_lowmem(surface, x, atmlst, gridslice)
+    else:
+        def dS_dot(x):
+            return get_dS_dot_q(dS, dSii, x, atmlst, gridslice)
+        def dD_dot(x):
+            return get_dD_dot_q(dD, x, atmlst, gridslice, ngrids)
+        def dDT_dot(x):
+            return _dDT_dot_q(dD, x, atmlst, gridslice, ngrids)
+    return dS_dot, dD_dot, dDT_dot
+
+def _second_derivative_sandwiches(pcmobj, dF, d2F, natom, gridslice):
+    '''get_v_dot_d2S_dot_q and get_v_dot_d2D_dot_q of the surface of pcmobj as
+    functions of the two vectors: from the matrices d2S and d2D
+    [3,3,ngrids,ngrids] where the two fit in memory, from the surface data
+    otherwise.'''
+    surface = pcmobj.surface
+    ngrids = surface['charge_exp'].shape[0]
+    required = (2 * 9 * ngrids**2 + 9 * ngrids * natom**2) * 8
+    d2D = d2S = d2Sii = None
+    if required <= get_avail_mem() * DENSE_DERIVATIVE_MEMORY_FRACTION:
+        try:
+            d2Sii = get_d2Sii(surface, dF, d2F)
+            d2D, d2S = get_d2D_d2S(surface, with_D=True, with_S=True)
+        except cupy.cuda.memory.OutOfMemoryError:
+            d2D = d2S = d2Sii = None
+    if d2D is None:
+        method = pcmobj.surface_discretization_method
+        def d2S_sandwich(v, q):
+            out = contract_d2S_offdiagonal(surface, v, q, gridslice)
+            out += contract_d2S_diagonal(surface, dF, v * q, method)
+            return out
+        def d2D_sandwich(v, q):
+            return contract_d2D_offdiagonal(surface, v, q, gridslice)
+    else:
+        def d2S_sandwich(v, q):
+            return get_v_dot_d2S_dot_q(d2S, d2Sii, v, q, natom, gridslice)
+        def d2D_sandwich(v, q):
+            return get_v_dot_d2D_dot_q(d2D, v, q, natom, gridslice)
+    return d2S_sandwich, d2D_sandwich
 
 def analytical_hess_solver(pcmobj, dm, verbose=None):
     if (not pcmobj._intermediates or
@@ -735,9 +1036,12 @@ def analytical_hess_solver(pcmobj, dm, verbose=None):
         dvK_1R = -einsum_Adi_ij_Adj_inverseK(VS_1_dot_dSdx, pcmobj) * R
 
     elif pcmobj.method.upper() in ['IEF-PCM', 'IEFPCM', 'SMD']:
-        dD, dS = get_dD_dS(pcmobj.surface, with_D=True, with_S=True)
         dF, dA = get_dF_dA(pcmobj.surface, surface_discretization_method = pcmobj.surface_discretization_method)
         dSii = get_dSii(pcmobj.surface, dF)
+        # The products of dS, dD and dD^T with a vector, of the matrices or of
+        # the surface data. D A, A S and R are applied as D and S on scaled
+        # vectors (three matrices of ngrids^2 less).
+        dS_dot, dD_dot, dDT_dot = _first_derivative_products(pcmobj, dSii, atmlst, gridslice)
 
         # dR = f_eps/(2*pi) * (dD*A + D*dA)
         # dK = dS - f_eps/(2*pi) * (dD*A*S + D*dA*S + D*A*dS)
@@ -752,33 +1056,30 @@ def analytical_hess_solver(pcmobj, dm, verbose=None):
         #             - (K-1 dK K-1 dR) + (K-1 d2R)
         f_eps_over_2pi = f_epsilon/(2.0*PI)
 
-        dSdx_dot_q = get_dS_dot_q(dS, dSii, q, atmlst, gridslice)
-        DA = D*A
-        dKdx_dot_q = dSdx_dot_q - f_eps_over_2pi * contract('ij,Adj->Adi', DA, dSdx_dot_q)
-        dAdx_dot_Sq = get_dA_dot_q(dA, S @ q, atmlst)
+        dSdx_dot_q = dS_dot(q)
+        dKdx_dot_q = dSdx_dot_q - f_eps_over_2pi * contract('ij,Adj->Adi', D, dSdx_dot_q * A)
+        Sq = S @ q
+        dAdx_dot_Sq = get_dA_dot_q(dA, Sq, atmlst)
         dKdx_dot_q -= f_eps_over_2pi * contract('ij,Adj->Adi', D, dAdx_dot_Sq)
-        AS = (A * S.T).T # It's just diag(A) @ S
-        ASq = AS @ q
-        dDdx_dot_ASq = get_dD_dot_q(dD, ASq, atmlst, gridslice, ngrids)
+        ASq = A * Sq
+        dDdx_dot_ASq = dD_dot(ASq)
         dKdx_dot_q -= f_eps_over_2pi * dDdx_dot_ASq
         dDdx_dot_ASq = None
 
         K_1_dot_dKdx_dot_q = einsum_ij_Adj_Adi_inverseK(pcmobj, dKdx_dot_q)
         dKdx_dot_q = None
 
-        vK_1_dot_dSdx = get_dST_dot_q(dS, dSii, vK_1, atmlst, gridslice)
+        vK_1_dot_dSdx = dS_dot(vK_1)
         vK_1_dot_dKdx = vK_1_dot_dSdx
         vK_1_dot_dSdx = None
-        vK_1_dot_dDdx = get_dDT_dot_q(dD, vK_1, atmlst, gridslice, ngrids)
-        vK_1_dot_dKdx -= f_eps_over_2pi * contract('ij,Adj->Adi', AS.T, vK_1_dot_dDdx)
-        AS = None
+        vK_1_dot_dDdx = dDT_dot(vK_1)
+        vK_1_dot_dKdx -= f_eps_over_2pi * contract('ij,Adj->Adi', S.T, vK_1_dot_dDdx * A)
         vK_1D = D.T @ vK_1
         vK_1D_dot_dAdx = get_dA_dot_q(dA, vK_1D, atmlst)
         vK_1_dot_dKdx -= f_eps_over_2pi * contract('ij,Adj->Adi', S.T, vK_1D_dot_dAdx)
-        vK_1DA = DA.T @ vK_1
-        DA = None
-        vK_1DA_dot_dSdx = get_dST_dot_q(dS, dSii, vK_1DA, atmlst, gridslice)
-        dS = None
+        vK_1DA = A * vK_1D
+        vK_1DA_dot_dSdx = dS_dot(vK_1DA)
+        dS_dot = None
         dSii = None
         vK_1_dot_dKdx -= f_eps_over_2pi * vK_1DA_dot_dSdx
         vK_1DA_dot_dSdx = None
@@ -786,18 +1087,23 @@ def analytical_hess_solver(pcmobj, dm, verbose=None):
         d2e_from_d2KR  = contract('Adi,BDi->ABdD', vK_1_dot_dKdx, K_1_dot_dKdx_dot_q)
         d2e_from_d2KR += contract('Adi,BDi->BADd', vK_1_dot_dKdx, K_1_dot_dKdx_dot_q)
 
+        # the products with dD that are needed below, before the second
+        # derivatives take the memory
+        dAdx_dot_V = get_dA_dot_q(dA, v_grids, atmlst)
+        dDdx_dot_AV = dD_dot(A * v_grids)
+        dD_dot = dDT_dot = None
+
         d2F, d2A = get_d2F_d2A(pcmobj.surface, pcmobj.surface_discretization_method)
-        vK_1_d2K_q  = get_v_dot_d2A_dot_q(d2A, vK_1D, S @ q)
+        vK_1_d2K_q  = get_v_dot_d2A_dot_q(d2A, vK_1D, Sq)
         vK_1_d2R_V  = get_v_dot_d2A_dot_q(d2A, vK_1D, v_grids)
         d2A = None
-        d2Sii = get_d2Sii(pcmobj.surface, dF, d2F)
+        d2S_sandwich, d2D_sandwich = _second_derivative_sandwiches(pcmobj, dF, d2F, natom, gridslice)
         dF = None
         d2F = None
-        d2D, d2S = get_d2D_d2S(pcmobj.surface, with_D=True, with_S=True)
-        vK_1_d2K_q += get_v_dot_d2D_dot_q(d2D, vK_1, ASq, natom, gridslice)
-        vK_1_d2R_V += get_v_dot_d2D_dot_q(d2D, vK_1, A * v_grids, natom, gridslice)
-        d2D = None
-        vK_1_d2K_q += get_v_dot_d2S_dot_q(d2S, d2Sii, vK_1DA, q, natom, gridslice)
+        vK_1_d2K_q += d2D_sandwich(vK_1, ASq)
+        vK_1_d2R_V += d2D_sandwich(vK_1, A * v_grids)
+        d2D_sandwich = None
+        vK_1_d2K_q += d2S_sandwich(vK_1DA, q)
         vK_1_d2K_q += contract('Adi,BDi->ABdD', vK_1_dot_dDdx, dAdx_dot_Sq)
         vK_1_d2K_q += contract('Adi,BDi->ABdD', vK_1_dot_dDdx * A, dSdx_dot_q)
         vK_1_d2K_q += contract('Adi,BDi->ABdD', vK_1D_dot_dAdx, dSdx_dot_q)
@@ -805,14 +1111,11 @@ def analytical_hess_solver(pcmobj, dm, verbose=None):
         vK_1_d2K_q += contract('Adi,BDi->BADd', vK_1_dot_dDdx * A, dSdx_dot_q)
         vK_1_d2K_q += contract('Adi,BDi->BADd', vK_1D_dot_dAdx, dSdx_dot_q)
         vK_1_d2K_q *= -f_eps_over_2pi
-        vK_1_d2K_q += get_v_dot_d2S_dot_q(d2S, d2Sii, vK_1, q, natom, gridslice)
-        d2S = None
-        d2Sii = None
+        vK_1_d2K_q += d2S_sandwich(vK_1, q)
+        d2S_sandwich = None
 
         d2e_from_d2KR -= vK_1_d2K_q
 
-        dAdx_dot_V = get_dA_dot_q(dA, v_grids, atmlst)
-        dDdx_dot_AV = get_dD_dot_q(dD, A * v_grids, atmlst, gridslice, ngrids)
         dRdx_dot_V = f_eps_over_2pi * (dDdx_dot_AV + contract('ij,Adj->Adi', D, dAdx_dot_V))
         dDdx_dot_AV = None
 
@@ -830,13 +1133,14 @@ def analytical_hess_solver(pcmobj, dm, verbose=None):
 
         dK_1Rv = -K_1_dot_dKdx_dot_q + K_1_dot_dRdx_dot_V
 
-        VK_1D_dot_dAdx = get_dA_dot_q(dA, (D.T @ vK_1).T, atmlst)
-        VK_1_dot_dDdx = get_dDT_dot_q(dD, vK_1, atmlst, gridslice, ngrids)
+        VK_1D_dot_dAdx = vK_1D_dot_dAdx
+        VK_1_dot_dDdx = vK_1_dot_dDdx
         VK_1_dot_dRdx = f_eps_over_2pi * (VK_1D_dot_dAdx + VK_1_dot_dDdx * A)
 
-        DA = D*A
-        R = -f_epsilon * (cupy.eye(DA.shape[0]) - 1.0/(2.0*PI)*DA)
-        dvK_1R = -einsum_Adi_ij_Adj_inverseK(vK_1_dot_dKdx, pcmobj) @ R + VK_1_dot_dRdx
+        # X R for R = -f_eps (1 - D A / (2 pi))
+        x = einsum_Adi_ij_Adj_inverseK(vK_1_dot_dKdx, pcmobj)
+        dvK_1R = f_epsilon * (x - 1.0/(2.0*PI) * contract('ji,Adj->Adi', D, x) * A) + VK_1_dot_dRdx
+        x = None
 
     elif pcmobj.method.upper() in ['SS(V)PE']:
         dD, dS = get_dD_dS(pcmobj.surface, with_D=True, with_S=True)
@@ -1017,52 +1321,57 @@ def get_dqsym_dx_fix_vgrids(pcmobj, atmlst):
         dSii = get_dSii(pcmobj.surface, dF)
         dF = None
 
-        dD, dS = get_dD_dS(pcmobj.surface, with_D=True, with_S=True)
+        # The products of dS, dD and dD^T with a vector, of the matrices or of
+        # the surface data. D A, A S and R are applied as D and S on scaled
+        # vectors (three matrices of ngrids^2 less).
+        dS_dot, dD_dot, dDT_dot = _first_derivative_products(pcmobj, dSii, atmlst, gridslice)
 
         # dR = f_eps/(2*pi) * (dD*A + D*dA)
         # dK = dS - f_eps/(2*pi) * (dD*A*S + D*dA*S + D*A*dS)
         f_eps_over_2pi = f_epsilon/(2.0*PI)
 
-        dSdx_dot_q = get_dS_dot_q(dS, dSii, q, atmlst, gridslice)
+        dSdx_dot_q = dS_dot(q)
 
-        DA = D*A
-        dKdx_dot_q = dSdx_dot_q - f_eps_over_2pi * contract('ij,Adj->Adi', DA, dSdx_dot_q)
+        dKdx_dot_q = dSdx_dot_q - f_eps_over_2pi * contract('ij,Adj->Adi', D, dSdx_dot_q * A)
 
-        dAdx_dot_Sq = get_dA_dot_q(dA, S @ q, atmlst)
+        Sq = S @ q
+        dAdx_dot_Sq = get_dA_dot_q(dA, Sq, atmlst)
         dKdx_dot_q -= f_eps_over_2pi * contract('ij,Adj->Adi', D, dAdx_dot_Sq)
 
-        AS = (A * S.T).T # It's just diag(A) @ S
-        dDdx_dot_ASq = get_dD_dot_q(dD, AS @ q, atmlst, gridslice, ngrids)
+        dDdx_dot_ASq = dD_dot(A * Sq)
         dKdx_dot_q -= f_eps_over_2pi * dDdx_dot_ASq
 
         dqdx_fix_Vq = -einsum_ij_Adj_Adi_inverseK(pcmobj, dKdx_dot_q)
 
         dAdx_dot_V = get_dA_dot_q(dA, v_grids, atmlst)
 
-        dDdx_dot_AV = get_dD_dot_q(dD, A * v_grids, atmlst, gridslice, ngrids)
+        dDdx_dot_AV = dD_dot(A * v_grids)
 
         dRdx_dot_V = f_eps_over_2pi * (dDdx_dot_AV + contract('ij,Adj->Adi', D, dAdx_dot_V))
         dqdx_fix_Vq += einsum_ij_Adj_Adi_inverseK(pcmobj, dRdx_dot_V)
 
         invKT_V = pcmobj.left_solve_K(v_grids, K_transpose = True)
-        dDdxT_dot_invKT_V = get_dDT_dot_q(dD, invKT_V, atmlst, gridslice, ngrids)
+        dDdxT_dot_invKT_V = dDT_dot(invKT_V)
 
         DT_invKT_V = D.T @ invKT_V
         dAdxT_dot_DT_invKT_V = get_dA_dot_q(dA, DT_invKT_V, atmlst)
         dqdx_fix_Vq += f_eps_over_2pi * (contract('i,Adi->Adi', A, dDdxT_dot_invKT_V) + dAdxT_dot_DT_invKT_V)
 
-        dSdxT_dot_invKT_V = get_dST_dot_q(dS, dSii, invKT_V, atmlst, gridslice)
+        dSdxT_dot_invKT_V = dS_dot(invKT_V)
         dKdxT_dot_invKT_V = dSdxT_dot_invKT_V
 
-        dKdxT_dot_invKT_V -= f_eps_over_2pi * contract('ij,Adj->Adi', AS.T, dDdxT_dot_invKT_V)
+        dKdxT_dot_invKT_V -= f_eps_over_2pi * contract('ij,Adj->Adi', S.T, dDdxT_dot_invKT_V * A)
         dKdxT_dot_invKT_V -= f_eps_over_2pi * contract('ij,Adj->Adi', S.T, dAdxT_dot_DT_invKT_V)
 
-        dSdxT_dot_AT_DT_invKT_V = get_dST_dot_q(dS, dSii, DA.T @ invKT_V, atmlst, gridslice)
+        dSdxT_dot_AT_DT_invKT_V = dS_dot(A * DT_invKT_V)
+        dS_dot = dD_dot = dDT_dot = None
         dKdxT_dot_invKT_V -= f_eps_over_2pi * dSdxT_dot_AT_DT_invKT_V
         invKT_dKdxT_dot_invKT_V = einsum_ij_Adj_Adi_inverseK(pcmobj, dKdxT_dot_invKT_V, K_transpose = True)
 
-        R = -f_epsilon * (cupy.eye(DA.shape[0]) - 1.0/(2.0*PI)*DA)
-        dqdx_fix_Vq += -contract('ij,Adj->Adi', R.T, invKT_dKdxT_dot_invKT_V)
+        # R^T x for R = -f_eps (1 - D A / (2 pi))
+        dqdx_fix_Vq += f_epsilon * (
+            invKT_dKdxT_dot_invKT_V
+            - 1.0/(2.0*PI) * contract('ji,Adj->Adi', D, invKT_dKdxT_dot_invKT_V) * A)
 
         dqdx_fix_Vq *= -0.5
 
@@ -1174,11 +1483,12 @@ def get_dqsym_dx_fix_K_R(pcmobj, dm, atmlst, intopt_derivative):
         R = -f_epsilon
         R_dVdx = R * dV_on_charge_dx
     else:
+        # R = -f_eps (1 - D A / (2 pi)), applied as D on scaled vectors
         A = pcmobj._intermediates['A']
         D = pcmobj._intermediates['D']
-        DA = D * A
-        R = -f_epsilon * (cupy.eye(DA.shape[0]) - 1.0/(2.0*PI)*DA)
-        R_dVdx = contract('ij,Adj->Adi', R, dV_on_charge_dx)
+        R_dVdx = -f_epsilon * (
+            dV_on_charge_dx
+            - 1.0/(2.0*PI) * contract('ij,Adj->Adi', D, dV_on_charge_dx * A))
 
     K_1_R_dVdx = einsum_ij_Adj_Adi_inverseK(pcmobj, R_dVdx)
     K_1T_dVdx = einsum_ij_Adj_Adi_inverseK(pcmobj, dV_on_charge_dx, K_transpose = True)
@@ -1186,18 +1496,200 @@ def get_dqsym_dx_fix_K_R(pcmobj, dm, atmlst, intopt_derivative):
     if pcmobj.if_method_in_CPCM_category:
         RT_K_1T_dVdx = R * K_1T_dVdx
     else:
-        RT_K_1T_dVdx = contract('ij,Adj->Adi', R.T, K_1T_dVdx)
+        RT_K_1T_dVdx = -f_epsilon * (
+            K_1T_dVdx - 1.0/(2.0*PI) * contract('ji,Adj->Adi', D, K_1T_dVdx) * A)
 
     dqdx_fix_K_R = 0.5 * (K_1_R_dVdx + RT_K_1T_dVdx)
 
     return dqdx_fix_K_R
 
 def get_dqsym_dx(pcmobj, dm, atmlst, intopt_derivative):
-    return get_dqsym_dx_fix_vgrids(pcmobj, atmlst) + get_dqsym_dx_fix_K_R(pcmobj, dm, atmlst, intopt_derivative)
+    # The three terms of a Hessian that take these (analytical_hess_nuc,
+    # analytical_hess_qv, analytical_grad_vmat) ask with the same density:
+    # kept with the charges of that density (PCM._get_vind)
+    intermediates = pcmobj._intermediates
+    key = tuple(atmlst)
+    kept = intermediates.get('dqsym_dx', None)
+    if (kept is not None and kept[0] is intermediates.get('dm', None) and kept[1] == key
+            and has_intermediates_for(pcmobj, dm)):
+        return kept[2]
+    dqdx = get_dqsym_dx_fix_vgrids(pcmobj, atmlst) + get_dqsym_dx_fix_K_R(pcmobj, dm, atmlst, intopt_derivative)
+    if has_intermediates_for(pcmobj, dm):
+        intermediates['dqsym_dx'] = (intermediates['dm'], key, dqdx)
+    return dqdx
 
-def analytical_grad_vmat(pcmobj, dm, mo_coeff, mo_occ, atmlst=None, verbose=None):
+# The integrals of the surface charges with the products of the orbitals and
+# the occupied orbitals, (p i|g) [ngrids, nmo nocc], turn the solvent's
+# response to the densities of the CPHF equations and the sums over derivative
+# charges of analytical_grad_vmat into matrix products (SurfaceMOIntegrals).
+# They are kept on the device up to this part of its available memory (a
+# small one: the other terms of the response size their batches by what is
+# available), on the host up to this part of mol.max_memory, and not made
+# beyond that.
+MO_INTEGRALS_DEVICE_FRACTION = .1
+MO_INTEGRALS_HOST_FRACTION = .5
+
+class SurfaceMOIntegrals:
+    '''(p i|g) = sum_{mu nu} C[mu,p] (mu nu|g) C[nu,i] for the surface charges
+    g of pcmobj, all orbitals p and the occupied ones i of one spin.
+
+    With them, for the densities D = C x C_occ^T + C_occ x^T C^T of first
+    order orbitals x [nmo,nocc] (no virtual-virtual block),
+        sum_{mu nu} D[mu,nu] (mu nu|g) = sum_{p i} w_p (C^T S D S C_occ)[p,i] (p i|g),
+    w = 2 for virtual p and 1 for occupied p (potential, mo_density), and the
+    matrix of charges between the orbitals is sum_g q[g] (p i|g) (fock).
+    '''
+    def __init__(self, pcmobj, mo_coeff, mo_occ, t, s):
+        self.mo_coeff = mo_coeff
+        self.mo_occ = mo_occ
+        mo_coeff = cupy.asarray(mo_coeff)
+        self.occidx = cupy.asarray(mo_occ) > 0
+        self.nmo = mo_coeff.shape[1]
+        self.nocc = int(self.occidx.sum())
+        self.ngrids = t.shape[0]
+        # [ngrids, nmo nocc], on the device or the host
+        self.t = t
+        self.sc = s.dot(mo_coeff)
+        # points of a product with the integrals on the host
+        self.blksize = max(1, int(2e8 / (8 * self.nmo * self.nocc)))
+
+    def matches(self, mo_coeff, mo_occ):
+        def same(a, b):
+            if a is b:
+                return True
+            a, b = cupy.asarray(a), cupy.asarray(b)
+            return a.shape == b.shape and bool((a == b).all())
+        return same(self.mo_coeff, mo_coeff) and same(self.mo_occ, mo_occ)
+
+    def mo_density(self, dms):
+        '''x [n, nmo nocc] of potential for the symmetric densities dms
+        [n,nao,nao]: w_p (C^T S D S C_occ)[p,i]. None if one of them has a
+        virtual-virtual block.'''
+        dms = cupy.asarray(dms)
+        n = len(dms)
+        vir = ~self.occidx
+        x = cupy.empty((n, self.nmo, self.nocc))
+        size = float(abs(dms).max()) if n else 0.
+        for k in range(n):
+            half = self.sc.T.dot(dms[k])
+            if float(abs(half[vir].dot(self.sc[:,vir])).max()) > 1e-9 * max(size, 1e-30):
+                return None
+            x[k] = half.dot(self.sc[:,self.occidx])
+        x[:,vir] *= 2
+        return x.reshape(n, -1)
+
+    def potential(self, x):
+        '''[n,ngrids]: sum_{p i} x[n,p,i] (p i|g)'''
+        x = cupy.asarray(x).reshape(-1, self.nmo * self.nocc)
+        if isinstance(self.t, cupy.ndarray):
+            return x.dot(self.t.T)
+        v = cupy.empty((len(x), self.ngrids))
+        for g0 in range(0, self.ngrids, self.blksize):
+            g1 = min(g0 + self.blksize, self.ngrids)
+            v[:,g0:g1] = x.dot(cupy.asarray(self.t[g0:g1]).T)
+        return v
+
+    def fock(self, q):
+        '''[n,nmo,nocc]: sum_g q[n,g] (p i|g)'''
+        q = cupy.asarray(q).reshape(-1, self.ngrids)
+        if isinstance(self.t, cupy.ndarray):
+            out = q.dot(self.t)
+        else:
+            out = cupy.zeros((len(q), self.nmo * self.nocc))
+            for g0 in range(0, self.ngrids, self.blksize):
+                g1 = min(g0 + self.blksize, self.ngrids)
+                out += q[:,g0:g1].dot(cupy.asarray(self.t[g0:g1]))
+        return out.reshape(len(q), self.nmo, self.nocc)
+
+def surface_mo_integrals(pcmobj, mo_coeff, mo_occ):
+    '''SurfaceMOIntegrals of pcmobj for the orbitals of one spin, or None:
+    beyond the angular momenta of the kernels of sgx.int1e_grids, or where
+    they fit neither on the device nor on the host
+    (MO_INTEGRALS_DEVICE_FRACTION, MO_INTEGRALS_HOST_FRACTION).'''
+    if (not pcmobj._intermediates or
+        not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
+        pcmobj.build()
+    opt = pcmobj._grid_integrals()
+    if opt is None:
+        return None
+    mol = pcmobj.mol
+    grid_coords = pcmobj.surface['grid_coords']
+    charge_exp = pcmobj.surface['charge_exp']
+    c = cupy.asarray(mo_coeff)
+    mocc = c[:,cupy.asarray(mo_occ) > 0]
+    ngrids = grid_coords.shape[0]
+    nmo, nocc = c.shape[1], mocc.shape[1]
+    nbytes = ngrids * nmo * nocc * 8
+    if nbytes <= get_avail_mem() * MO_INTEGRALS_DEVICE_FRACTION:
+        t = cupy.empty((ngrids, nmo, nocc))
+    elif nbytes <= mol.max_memory * 1e6 * MO_INTEGRALS_HOST_FRACTION:
+        t = numpy.empty((ngrids, nmo, nocc))
+    else:
+        return None
+    opt.orbital_contracted(c, mocc, grid_coords, charge_exp**2, out=t)
+    s = cupy.asarray(mol.intor('int1e_ovlp'))
+    return SurfaceMOIntegrals(pcmobj, mo_coeff, mo_occ, t.reshape(ngrids, nmo * nocc), s)
+
+def _mo_integrals_of(hessobj, mo_coeff, mo_occ):
+    '''The SurfaceMOIntegrals of the solvent of a Hessian object for these
+    orbitals (a pair for the two spins of unrestricted orbitals), made at the
+    first call and kept on the object until its kernel ends; None where they
+    are not to be had.'''
+    unrestricted = isinstance(hessobj.base, scf.uhf.UHF)
+    kept = getattr(hessobj, '_solvent_mo_integrals', None)
+    if kept is not None:
+        pairs = zip(kept, mo_coeff, mo_occ) if unrestricted else [(kept, mo_coeff, mo_occ)]
+        if all(k.matches(c, o) for k, c, o in pairs):
+            return kept
+        hessobj._solvent_mo_integrals = kept = None
+    solvent = hessobj.base.with_solvent
+    if unrestricted:
+        ints = tuple(surface_mo_integrals(solvent, mo_coeff[k], mo_occ[k]) for k in range(2))
+        if ints[0] is None or ints[1] is None:
+            ints = None
+    else:
+        ints = surface_mo_integrals(solvent, mo_coeff, mo_occ)
+    hessobj._solvent_mo_integrals = ints
+    return ints
+
+def _response_from_mo_integrals(solvent, ints, dms):
+    '''The solvent's response to the densities dms of the CPHF equations
+    ([n,nao,nao], or [2,n,nao,nao] for the two spins) as the matrices between
+    the orbitals and the occupied ones [n,nmo,nocc] (a pair for the spins):
+    PCM._B_dot_x and its transformation, with the two contractions of the
+    integrals as products with SurfaceMOIntegrals. None for densities that
+    are not of first order orbitals.'''
+    unrestricted = isinstance(ints, tuple)
+    if unrestricted:
+        v_grids = 0
+        for k in range(2):
+            x = ints[k].mo_density(dms[k])
+            if x is None:
+                return None
+            v_grids = v_grids - ints[k].potential(x)
+    else:
+        x = ints.mo_density(dms)
+        if x is None:
+            return None
+        v_grids = -ints.potential(x)
+    x = None
+
+    b = solvent.left_multiply_R(v_grids.T)
+    q = solvent.left_solve_K(b).T
+    vK_1 = solvent.left_solve_K(v_grids.T, K_transpose = True)
+    qt = solvent.left_multiply_R(vK_1, R_transpose = True).T
+    q_sym = (q + qt)/2.0
+    q_sym *= -1
+    if unrestricted:
+        return ints[0].fock(q_sym), ints[1].fock(q_sym)
+    return ints.fock(q_sym)
+
+def analytical_grad_vmat(pcmobj, dm, mo_coeff, mo_occ, atmlst=None, verbose=None, mo_integrals=None):
     '''
     dv_solv / da
+
+    mo_integrals: the SurfaceMOIntegrals of these orbitals, for the matrices
+    of the derivatives of the charges
     '''
     if (not pcmobj._intermediates or
         not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
@@ -1258,6 +1750,10 @@ def analytical_grad_vmat(pcmobj, dm, mo_coeff, mo_occ, atmlst=None, verbose=None
     dV_on_molecule_dx_mo = dIdx_mo
 
     dqdx = get_dqsym_dx(pcmobj, dm, atmlst, intopt_derivative)
+    if mo_integrals is not None:
+        dV_on_molecule_dx_mo += mo_integrals.fock(dqdx.reshape(-1, dqdx.shape[-1])).reshape(
+            dV_on_molecule_dx_mo.shape)
+        atmlst = ()
     for i_atom in atmlst:
         for i_xyz in range(3):
             dIdx_from_dqdx = int1e_grids(mol, grid_coords, charges = dqdx[i_atom, i_xyz, :],
@@ -1321,9 +1817,13 @@ class WithSolventHess:
         if natm_without_ghost(self.mol) != self.mol.natm:
             raise NotImplementedError("Ghost atom not supported for PCM Hessian")
 
-        with lib.temporary_env(self.base.with_solvent, equilibrium_solvation=True):
-            logger.debug(self, 'Compute hessian from solutes')
-            self.de_solute = super().kernel(*args, **kwargs)
+        try:
+            with lib.temporary_env(self.base.with_solvent, equilibrium_solvation=True):
+                logger.debug(self, 'Compute hessian from solutes')
+                self.de_solute = super().kernel(*args, **kwargs)
+        finally:
+            # the integrals with the orbital products (_mo_integrals_of)
+            self._solvent_mo_integrals = None
         logger.debug(self, 'Compute hessian from solvents')
         self.de_solvent = self.base.with_solvent.hess(dm)
         self.de = self.de_solute + self.de_solvent
@@ -1335,9 +1835,11 @@ class WithSolventHess:
         # self.__class__.__bases__ are (WithSolventHess, vac_hess.__class__)
         vac_hess_klass = self.__class__.__bases__[1]
         h1ao = vac_hess_klass.make_h1(self, mo_coeff, mo_occ, atmlst=atmlst, verbose=verbose)
+        ints = _mo_integrals_of(self, mo_coeff, mo_occ)
         if isinstance(self.base, scf.hf.RHF):
             dm = self.base.make_rdm1()
-            dv = analytical_grad_vmat(self.base.with_solvent, dm, mo_coeff, mo_occ, atmlst=atmlst, verbose=verbose)
+            dv = analytical_grad_vmat(self.base.with_solvent, dm, mo_coeff, mo_occ, atmlst=atmlst, verbose=verbose,
+                                      mo_integrals=ints)
             for i0, ia in enumerate(atmlst):
                 h1ao[i0] += dv[i0]
             return h1ao
@@ -1346,8 +1848,12 @@ class WithSolventHess:
             solvent = self.base.with_solvent
             dm = self.base.make_rdm1()
             dm = dm[0] + dm[1]
-            dva = analytical_grad_vmat(solvent, dm, mo_coeff[0], mo_occ[0], atmlst=atmlst, verbose=verbose)
-            dvb = analytical_grad_vmat(solvent, dm, mo_coeff[1], mo_occ[1], atmlst=atmlst, verbose=verbose)
+            if ints is None:
+                ints = (None, None)
+            dva = analytical_grad_vmat(solvent, dm, mo_coeff[0], mo_occ[0], atmlst=atmlst, verbose=verbose,
+                                       mo_integrals=ints[0])
+            dvb = analytical_grad_vmat(solvent, dm, mo_coeff[1], mo_occ[1], atmlst=atmlst, verbose=verbose,
+                                       mo_integrals=ints[1])
             for i0, ia in enumerate(atmlst):
                 h1aoa[i0] += dva[i0]
                 h1aob[i0] += dvb[i0]
@@ -1361,6 +1867,23 @@ class WithSolventHess:
         v1vo = vac_hess_klass.get_veff_resp_mo(self, mol, dms, mo_coeff, mo_occ, hermi=hermi)
         if not self.base.with_solvent.equilibrium_solvation:
             return v1vo
+        solvent = self.base.with_solvent
+        if solvent.frozen_dm0_for_finite_difference_without_response is None:
+            # as products with the integrals of the surface charges and the
+            # orbital products, where there are such
+            ints = _mo_integrals_of(self, mo_coeff, mo_occ)
+            v_solvent = None
+            if ints is not None:
+                v_solvent = _response_from_mo_integrals(solvent, ints, dms)
+            if v_solvent is not None:
+                if isinstance(ints, tuple):
+                    n_dm = dms.shape[1]
+                    na = v_solvent[0][0].size
+                    v1vo[:,:na] += v_solvent[0].reshape(n_dm,-1)
+                    v1vo[:,na:] += v_solvent[1].reshape(n_dm,-1)
+                else:
+                    v1vo += v_solvent.reshape(dms.shape[0],-1)
+                return v1vo
         v_solvent = self.base.with_solvent._B_dot_x(dms)
         if isinstance(self.base, scf.uhf.UHF):
             n_dm = dms.shape[1]

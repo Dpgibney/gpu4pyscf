@@ -18,9 +18,22 @@ import cupy as cp
 import pyscf
 import pytest
 from gpu4pyscf.dft import rks, uks
+from pyscf import lib
+from gpu4pyscf.hessian import rks as rks_hess
 from gpu4pyscf.hessian.rks import _get_vnlc_deriv1, _get_enlc_deriv2, get_dweight_dA, get_d2weight_dAdB
 from gpu4pyscf.lib.multi_gpu import num_devices
 from gpu4pyscf.dft import gen_grid
+
+class _LibraryWithout:
+    '''A compiled library as if it had no entry of the given name'''
+    def __init__(self, library, name):
+        self._library = library
+        self._name = name
+
+    def __getattr__(self, name):
+        if name == self._name:
+            raise AttributeError(name)
+        return getattr(self._library, name)
 
 def setUpModule():
     global mol, mol_unrestricted
@@ -737,6 +750,110 @@ class KnownValues(unittest.TestCase):
 
         assert np.linalg.norm(test_dF[0] - reference_dF[0]) < 1e-8
         assert np.linalg.norm(test_dF[1] - reference_dF[1]) < 1e-8
+
+    def test_vv10_terms_shared(self):
+        # Inside hess_elec the Fock derivative takes f_t from the energy
+        # second derivative: of the orbital response of the density, to which
+        # it adds the part of the grid response from the kernel by atom, or,
+        # where the second derivative has the grid response, all of it; and
+        # without the grid response in the Fock derivative
+        # (nlc_fock_grid_response), the one of the orbital response as it is
+        for restricted, m in ((True, mol), (False, mol_unrestricted)):
+            mf = make_mf(m, vv10_only = True, density_fitting = True, restricted = restricted, nlcgrid = (10,14))
+            hess_obj = mf.Hessian()
+            assert hess_obj.nlc_fock_grid_response
+            fock_derivatives = {}
+            for grid_response, fock_grid_response in ((False, True), (True, True), (False, False), (True, False)):
+                hess_obj.grid_response = grid_response
+                hess_obj.nlc_fock_grid_response = fock_grid_response
+                ref_de2 = _get_enlc_deriv2(hess_obj, mf.mo_coeff, mf.mo_occ, max_memory = None)
+                ref_dF = _get_vnlc_deriv1(hess_obj, mf.mo_coeff, mf.mo_occ, max_memory = None)
+
+                hess_obj._nlc_shared = {}
+                try:
+                    test_de2 = _get_enlc_deriv2(hess_obj, mf.mo_coeff, mf.mo_occ, max_memory = None)
+                    assert hess_obj._nlc_shared['f_t'][0] == ('full' if grid_response else 'orbital')
+                    test_dF = _get_vnlc_deriv1(hess_obj, mf.mo_coeff, mf.mo_occ, max_memory = None)
+                    assert 'f_t' not in hess_obj._nlc_shared
+
+                    # what was kept for other orbitals is not used
+                    _get_enlc_deriv2(hess_obj, mf.mo_coeff, mf.mo_occ, max_memory = None)
+                    kind, mo_kept, mask, f_rho_t, f_gamma_t = hess_obj._nlc_shared['f_t']
+                    hess_obj._nlc_shared['f_t'] = (kind, mo_kept * 1.1, mask, f_rho_t * 0, f_gamma_t * 0)
+                    other_dF = _get_vnlc_deriv1(hess_obj, mf.mo_coeff, mf.mo_occ, max_memory = None)
+                    assert 'f_t' not in hess_obj._nlc_shared
+                    # with a compiled library that has no kernel by atom
+                    _get_enlc_deriv2(hess_obj, mf.mo_coeff, mf.mo_occ, max_memory = None)
+                    with lib.temporary_env(rks_hess, libgdft = _LibraryWithout(
+                            rks_hess.libgdft, 'VXC_vv10nlc_hess_eval_f_t_by_atom')):
+                        old_dF = _get_vnlc_deriv1(hess_obj, mf.mo_coeff, mf.mo_occ, max_memory = None)
+                    assert 'f_t' not in hess_obj._nlc_shared
+                finally:
+                    del hess_obj._nlc_shared
+
+                assert float(abs(test_de2 - ref_de2).max()) < 1e-11
+                if restricted:
+                    ref_dF, test_dF, other_dF, old_dF = [ref_dF], [test_dF], [other_dF], [old_dF]
+                for ref, test, other, old in zip(ref_dF, test_dF, other_dF, old_dF):
+                    assert float(abs(ref).max()) > 1e-4
+                    assert float(abs(test - ref).max()) < 1e-11
+                    assert float(abs(other - ref).max()) < 1e-11
+                    assert float(abs(old - ref).max()) < 1e-11
+                fock_derivatives[grid_response, fock_grid_response] = ref_dF
+            # the Fock derivative does not depend on the Hessian object's
+            # grid_response, and does on its own switch
+            for a, b in zip(fock_derivatives[False, True], fock_derivatives[True, True]):
+                assert float(abs(a - b).max()) < 1e-11
+            for a, b in zip(fock_derivatives[False, False], fock_derivatives[True, False]):
+                assert float(abs(a - b).max()) < 1e-11
+            for a, b in zip(fock_derivatives[False, True], fock_derivatives[False, False]):
+                assert float(abs(a - b).max()) > 1e-6
+
+    def test_vv10_response_from_orbitals(self):
+        # the response to the densities of first-order orbitals, from the
+        # orbitals that such densities carry and from the densities alone
+        from gpu4pyscf.hessian.rks import nr_rks_fnlc_mo
+        from gpu4pyscf.lib.cupy_helper import tag_array, contract
+        mf = make_mf(mol, vv10_only = True, density_fitting = True, nlcgrid = (10,14))
+        mo_coeff = cp.asarray(mf.mo_coeff)
+        mo_occ = cp.asarray(mf.mo_occ)
+        mocc = mo_coeff[:, mo_occ > 0]
+        rng = np.random.default_rng(4)
+        mo1 = cp.asarray(rng.normal(size = (5, mo_coeff.shape[1], mocc.shape[1])))
+        mo1_mo = contract('npo,ip->nio', mo1, mo_coeff)
+        dm1 = contract('npi,qi->npq', mo1_mo, mocc * 2)
+        dm1 = dm1 + dm1.transpose(0,2,1)
+        ref = nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1)
+        tagged = tag_array(dm1, mo1 = mo1_mo, occ_coeff = mocc, symmetrize = 1)
+        test = nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, tagged)
+        assert test.shape == ref.shape
+        assert float(abs(ref).max()) > 1e-4
+        assert float(abs(test - ref).max()) < 1e-12
+
+        # unrestricted: the densities of the two spins, as hessian.uhf.gen_vind makes them
+        from gpu4pyscf.hessian.uks import nr_uks_fnlc_mo
+        from gpu4pyscf.df.df_jk import _stack_uhf_occ_oribtals
+        mf = make_mf(mol_unrestricted, vv10_only = True, density_fitting = True, restricted = False,
+                     nlcgrid = (10,14))
+        mo_coeff = cp.asarray(mf.mo_coeff)
+        mo_occ = cp.asarray(mf.mo_occ)
+        orboa = mo_coeff[0][:, mo_occ[0] > 0]
+        orbob = mo_coeff[1][:, mo_occ[1] > 0]
+        assert orboa.shape[1] > orbob.shape[1]
+        orbo = _stack_uhf_occ_oribtals(orboa, orbob)
+        nmo = mo_coeff.shape[2]
+        mo1 = _stack_uhf_occ_oribtals(cp.asarray(rng.normal(size = (5, nmo, orboa.shape[1]))),
+                                      cp.asarray(rng.normal(size = (5, nmo, orbob.shape[1]))))
+        mo1_mo = contract('snai,spa->snpi', mo1, mo_coeff)
+        dm1 = contract('snpi,sqi->snpq', mo1_mo, orbo)
+        dm1 = dm1 + dm1.transpose(0,1,3,2)
+        ref = nr_uks_fnlc_mo(mf, mol_unrestricted, mo_coeff, mo_occ, dm1)
+        tagged = tag_array(dm1, mo1 = mo1_mo, occ_coeff = orbo, symmetrize = 1)
+        test = nr_uks_fnlc_mo(mf, mol_unrestricted, mo_coeff, mo_occ, tagged)
+        for a, b in zip(ref, test):
+            assert a.shape == b.shape
+            assert float(abs(a).max()) > 1e-4
+            assert float(abs(a - b).max()) < 1e-12
 
     def test_becke_weight_first_derivative(self):
         for radii_adjust in [True, False]:

@@ -699,6 +699,202 @@ H       0.7570000000     0.0000000000    -0.4696000000
 
         assert np.max(np.abs(test_hess - ref_hess)) < 1e-14
 
+    def test_dD_and_d2D_lowmem(self):
+        # the products of dD, dD^T and the sandwich of d2D from the surface
+        # data, against the matrices (an atom without grid points among them)
+        mol = pyscf.M( # neopentane
+            atom = """
+                C      1.042440    0.085610   -0.011740
+                C      2.570330    0.085610   -0.011740
+                C      3.079630   -0.875920   -1.084370
+                C      3.079630    1.495300   -0.308120
+                C      3.079630   -0.362560    1.357290
+                H      0.649570    0.403960   -0.984220
+                H      0.649560    0.768620    0.750200
+                H      0.649560   -0.915760    0.198800
+                H      2.728230   -0.577130   -2.078680
+                H      2.728220   -1.896850   -0.895670
+                H      4.175330   -0.895490   -1.106200
+                H      2.728220    1.842340   -1.286640
+                H      4.175330    1.523990   -0.314160
+                H      2.728220    2.207010    0.447780
+                H      2.728210   -1.373050    1.595690
+                H      2.728210    0.311330    2.147090
+                H      4.175320   -0.371680    1.385160
+            """,
+            basis = "sto-3g",
+            verbose = 4,
+            output = '/dev/null',
+        )
+
+        mf = scf.hf.RHF(mol)
+        mf = mf.density_fit("def2-universal-jkfit")
+        mf = mf.PCM()
+        mf.with_solvent.method = "IEF-PCM"
+        mf.with_solvent.lebedev_order = 19
+        mf.with_solvent.radii_table = ["X", 2.49443848 + 1, "He", "Li", "Be", "B", 3.85504129] # the center C without grid points
+
+        mf.conv_tol = 1e0
+        mf.kernel()
+
+        pcmobj = mf.with_solvent
+        surface = pcmobj.surface
+        gridslice = surface['gslice_by_atom']
+        assert any(g0 == g1 for g0, g1 in gridslice)
+        q = pcmobj._intermediates['q']
+        v_grids = pcmobj._intermediates['v_grids']
+        vK_1 = pcmobj.left_solve_K(v_grids, K_transpose = True)
+        ngrids = q.size
+        atmlst = range(mol.natm)
+
+        from gpu4pyscf.solvent.grad.pcm import get_dD_dS
+        from gpu4pyscf.solvent.hessian import pcm as pcm_hessian
+        dD, _ = get_dD_dS(surface, with_D=True, with_S=True)
+        for x in (q, vK_1):
+            ref = pcm_hessian.get_dD_dot_q(dD, x, atmlst, gridslice, ngrids)
+            test = pcm_hessian.get_dD_dot_q_lowmem(surface, x, atmlst, gridslice)
+            assert float(abs(test - ref).max()) < 1e-11 * float(abs(ref).max())
+            ref = pcm_hessian.get_dDT_dot_q(dD, x, atmlst, gridslice, ngrids)
+            test = pcm_hessian.get_dDT_dot_q_lowmem(surface, x, atmlst, gridslice)
+            assert float(abs(test - ref).max()) < 1e-11 * float(abs(ref).max())
+            # and from the matrix without a copy of its transpose
+            test = pcm_hessian._dDT_dot_q(dD, x, atmlst, gridslice, ngrids)
+            assert float(abs(test - ref).max()) < 1e-12 * float(abs(ref).max())
+        del dD
+
+        d2D, _ = pcm_hessian.get_d2D_d2S(surface, with_D=True, with_S=True)
+        ref = pcm_hessian.get_v_dot_d2D_dot_q(d2D, vK_1, q, mol.natm, gridslice)
+        test = pcm_hessian.contract_d2D_offdiagonal(surface, vK_1, q, gridslice)
+        assert float(abs(test - ref).max()) < 1e-11 * float(abs(ref).max())
+        ref = pcm_hessian.get_v_dot_d2DT_dot_q(d2D, vK_1, q, mol.natm, gridslice)
+        test = pcm_hessian.contract_d2D_offdiagonal(surface, vK_1, q, gridslice, transpose=True)
+        assert float(abs(test - ref).max()) < 1e-11 * float(abs(ref).max())
+
+    def test_iefpcm_lowmem(self):
+        # the Hessian terms of IEF-PCM without the matrices dD, dS, d2D, d2S
+        mol = pyscf.M(
+            atom = """
+                O  0.0000  0.7375 -0.0528
+                O  0.0000 -0.7375 -0.1528
+                H  0.8190  0.8170  0.4220
+                H -0.8190 -0.8170  1.4220
+            """,
+            basis = "6-31g",
+            verbose = 4,
+            output = '/dev/null',
+        )
+
+        mf = scf.hf.RHF(mol).density_fit("def2-universal-jkfit")
+        mf = mf.PCM()
+        mf.with_solvent.method = "IEF-PCM"
+        mf.with_solvent.lebedev_order = 17
+
+        mf.conv_tol = 1e0
+        mf.kernel()
+        dm = mf.make_rdm1()
+
+        pcmobj = mf.with_solvent
+        ref_hess = pcmobj.hess(dm)
+        ref_vmat = analytical_grad_vmat(pcmobj, dm, mf.mo_coeff, mf.mo_occ)
+
+        from pyscf import lib
+        import gpu4pyscf.solvent.hessian.pcm as pcm_hessian
+        assert pcm_hessian.DENSE_DERIVATIVE_MEMORY_FRACTION > 0
+        with lib.temporary_env(pcm_hessian, DENSE_DERIVATIVE_MEMORY_FRACTION=0):
+            test_hess = pcmobj.hess(dm)
+            test_vmat = analytical_grad_vmat(pcmobj, dm, mf.mo_coeff, mf.mo_occ)
+
+        assert np.max(np.abs(test_hess - ref_hess)) < 1e-12
+        assert float(abs(test_vmat - ref_vmat).max()) < 1e-12
+
+    def test_mo_integrals(self):
+        # The solvent's response in the CPHF equations and the matrices of
+        # the derivative charges as products with the integrals of the surface
+        # charges and the orbital products, against the contractions of the
+        # integrals for each density and each set of charges
+        from pyscf import lib
+        import gpu4pyscf.solvent.hessian.pcm as pcm_hessian
+        from gpu4pyscf.hessian.rhf import _ao2mo
+        atom = """
+            O  0.0000  0.7375 -0.0528
+            O  0.0000 -0.7375 -0.1528
+            H  0.8190  0.8170  0.4220
+            H -0.8190 -0.8170  1.4220
+        """
+        rng = np.random.default_rng(1)
+        for spin, charge in ((0, 0), (1, 1)):
+            mol = pyscf.M(atom = atom, basis = "6-31g*", charge = charge, spin = spin,
+                          verbose = 4, output = '/dev/null')
+            mf = (scf.hf.RHF(mol) if spin == 0 else scf.uhf.UHF(mol)).density_fit("def2-universal-jkfit")
+            mf = mf.PCM()
+            mf.with_solvent.method = "IEF-PCM"
+            mf.with_solvent.lebedev_order = 17
+            mf.conv_tol = 1e-10
+            mf.kernel()
+            pcmobj = mf.with_solvent
+            hobj = mf.Hessian()
+            mo_coeff = cp.asarray(mf.mo_coeff)
+            mo_occ = cp.asarray(mf.mo_occ)
+            nao = mol.nao
+
+            for device_fraction in (.5, 0.):
+                with lib.temporary_env(pcm_hessian, MO_INTEGRALS_DEVICE_FRACTION=device_fraction):
+                    hobj._solvent_mo_integrals = None
+                    ints = pcm_hessian._mo_integrals_of(hobj, mo_coeff, mo_occ)
+                assert ints is not None
+                assert pcm_hessian._mo_integrals_of(hobj, mo_coeff, mo_occ) is ints
+                one = ints if spin == 0 else ints[0]
+                assert isinstance(one.t, cp.ndarray if device_fraction else np.ndarray)
+
+                # the response to the densities of first-order orbitals
+                if spin == 0:
+                    mocc = mo_coeff[:,mo_occ>0]
+                    mo1 = cp.asarray(rng.normal(size=(3, mol.nao, mocc.shape[1])))
+                    dms = cp.einsum('pq,nqi,ri->npr', mo_coeff, mo1, mocc)
+                    dms = (dms + dms.transpose(0,2,1)) * 2
+                    ref = _ao2mo(pcmobj._B_dot_x(dms), mocc, mo_coeff)
+                    test = pcm_hessian._response_from_mo_integrals(pcmobj, ints, dms)
+                    assert float(abs(test - ref).max()) < 1e-11 * float(abs(ref).max())
+                    # not for a density with a virtual-virtual block
+                    dms[1] += mo_coeff.dot(mo_coeff.T)
+                    assert pcm_hessian._response_from_mo_integrals(pcmobj, ints, dms) is None
+                else:
+                    dms = []
+                    for k in range(2):
+                        mocc = mo_coeff[k][:,mo_occ[k]>0]
+                        mo1 = cp.asarray(rng.normal(size=(3, mol.nao, mocc.shape[1])))
+                        dm1 = cp.einsum('pq,nqi,ri->npr', mo_coeff[k], mo1, mocc)
+                        dms.append(dm1 + dm1.transpose(0,2,1))
+                    dms = cp.stack(dms)
+                    v = pcmobj._B_dot_x(dms)
+                    v = v[0] + v[1]
+                    test = pcm_hessian._response_from_mo_integrals(pcmobj, ints, dms)
+                    for k in range(2):
+                        ref = _ao2mo(v, mo_coeff[k][:,mo_occ[k]>0], mo_coeff[k])
+                        assert float(abs(test[k] - ref).max()) < 1e-11 * float(abs(ref).max())
+
+                # the matrices of the derivative charges
+                dm = mf.make_rdm1()
+                if spin:
+                    dm = dm[0] + dm[1]
+                for k in range(1 if spin == 0 else 2):
+                    c, occ, one = (mo_coeff, mo_occ, ints) if spin == 0 else (mo_coeff[k], mo_occ[k], ints[k])
+                    ref = analytical_grad_vmat(pcmobj, dm, c, occ)
+                    test = analytical_grad_vmat(pcmobj, dm, c, occ, mo_integrals=one)
+                    assert float(abs(test - ref).max()) < 1e-11 * float(abs(ref).max())
+
+            # the Hessian with them, on the device and on the host, and without
+            hessians = []
+            for device_fraction, host_fraction in ((.5, .5), (0., .5), (0., 0.)):
+                with lib.temporary_env(pcm_hessian, MO_INTEGRALS_DEVICE_FRACTION=device_fraction,
+                                       MO_INTEGRALS_HOST_FRACTION=host_fraction):
+                    hobj = mf.Hessian()
+                    hobj.auxbasis_response = 2
+                    hessians.append(hobj.kernel())
+                    assert hobj._solvent_mo_integrals is None
+            assert np.max(np.abs(hessians[0] - hessians[2])) < 1e-9
+            assert np.max(np.abs(hessians[1] - hessians[2])) < 1e-9
+
 if __name__ == "__main__":
     print("Full Tests for Hessian of PCMs")
     unittest.main()

@@ -59,7 +59,11 @@ def tearDownModule():
     del mol_close, mol_open
 
 class KnownValues(unittest.TestCase):
-    # All reference results from the same calculation with mf.level_shift = 0
+    # All reference results from the same calculation with mf.level_shift = 0,
+    # the CPHF equations solved to a residual of 1e-9 (cphf_residual_tol). The
+    # Krylov solver at conv_tol_cpscf, which the references were made with
+    # before, is 1.7 (RKS) and 2.5 cm^-1 (UKS) from these, 0.001 (RHF) and
+    # 0.06 cm^-1 (UHF)
 
     def test_level_shift_hessian_rks(self):
         mf = RKS(mol_close, xc = 'wB97X')
@@ -79,9 +83,9 @@ class KnownValues(unittest.TestCase):
         test_frequency = results['freq_wavenumber']
 
         ref_energy = -189.52569283262818
-        ref_frequency = np.array([-295.34653089,  653.58625595,  879.10396141, 1150.01342468,
-            1208.68664975, 1340.42573432, 1349.27967164, 1761.31892282,
-            1792.17470571])
+        ref_frequency = np.array([-293.6647  ,  653.627964,  879.084602, 1150.084798,
+            1208.695842, 1340.444446, 1349.276006, 1761.905008,
+            1792.488249])
         assert np.max(np.abs(test_energy - ref_energy)) < 1e-7
         assert np.max(np.abs(test_frequency - ref_frequency)) < 5e-2
 
@@ -104,8 +108,8 @@ class KnownValues(unittest.TestCase):
         test_frequency = results['freq_wavenumber']
 
         ref_energy = -188.92925230031926
-        ref_frequency = np.array([ 292.72066163,  877.69576251, 1082.27549661, 1277.57877335,
-            1693.48392029, 1760.06314071])
+        ref_frequency = np.array([ 290.17636 ,  877.677068, 1081.500649, 1277.54542 ,
+            1693.164015, 1759.986779])
         assert np.max(np.abs(test_energy - ref_energy)) < 1e-7
         assert np.max(np.abs(test_frequency - ref_frequency)) < 5e-2
 
@@ -125,9 +129,9 @@ class KnownValues(unittest.TestCase):
         test_frequency = results['freq_wavenumber']
 
         ref_energy = -188.53825152772055
-        ref_frequency = np.array([-286.23234581,  703.64600407,  988.93397474, 1234.5357708 ,
-            1246.90357193, 1391.30937505, 1443.06463755, 1774.96137283,
-            1818.52710482])
+        ref_frequency = np.array([-286.232322,  703.646173,  988.934769, 1234.535995,
+            1246.903379, 1391.310072, 1443.064264, 1774.960853,
+            1818.527194])
         assert np.max(np.abs(test_energy - ref_energy)) < 1e-10
         assert np.max(np.abs(test_frequency - ref_frequency)) < 1e-2
 
@@ -148,8 +152,8 @@ class KnownValues(unittest.TestCase):
         test_frequency = results['freq_wavenumber']
 
         ref_energy = -188.00032587095123
-        ref_frequency = np.array([ 624.64398354, 1030.20793768, 1183.88711991, 1362.44325456,
-            1694.04574717, 1798.01003435])
+        ref_frequency = np.array([ 624.635893, 1030.204167, 1183.823855, 1362.457241,
+            1693.987845, 1797.99353 ])
         assert np.max(np.abs(test_energy - ref_energy)) < 1e-10
         assert np.max(np.abs(test_frequency - ref_frequency)) < 1e-1
 

@@ -14,6 +14,7 @@
 
 import os
 import sys
+import gc
 import warnings
 import functools
 import ctypes
@@ -1379,15 +1380,34 @@ def set_conditional_mempool_malloc(n_bytes_threshold=MEMPOOL_THRESHOLD):
     chunks will be released back to the system when the associated object is
     destroyed. Only small memory blocks are allocated from the CuPy memory pool.
 
+    Where the device cannot give a large chunk, the free blocks that the memory
+    pool holds are returned to the device first, as the pool does for its own
+    allocations (the pool can hold most of a small card's memory in blocks it
+    no longer uses, which get_avail_mem counts as available).
+
     Execute the following command to restore the default CuPy malloc
         cupy.cuda.set_allocator(cupy.get_default_memory_pool().malloc)
     '''
     cuda_malloc = cupy.cuda.memory._malloc
-    default_mempool_malloc = cupy.get_default_memory_pool().malloc
+    mempool = cupy.get_default_memory_pool()
+    default_mempool_malloc = mempool.malloc
+    CUDARuntimeError = cupy.cuda.runtime.CUDARuntimeError
+    out_of_memory = 2   # cudaErrorMemoryAllocation
+
     def malloc(size):
-        if size > n_bytes_threshold:
-            return cuda_malloc(size)
-        return default_mempool_malloc(size)
+        if size <= n_bytes_threshold:
+            return default_mempool_malloc(size)
+        for attempt in range(3):
+            if attempt == 2:
+                gc.collect()
+            if attempt > 0:
+                mempool.free_all_blocks()
+            try:
+                return cuda_malloc(size)
+            except CUDARuntimeError as err:
+                if err.status != out_of_memory:
+                    raise
+        raise cupy.cuda.memory.OutOfMemoryError(size, mempool.total_bytes(), mempool.get_limit())
     cupy.cuda.set_allocator(malloc)
 
 def vec_dot(vec1, vec2):

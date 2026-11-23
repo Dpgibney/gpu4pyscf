@@ -175,3 +175,154 @@ def solve_withs1(fvind, mo_energy, mo_occ, h1, s1,
         mo1_a, mo1_b = mo1_a[0], mo1_b[0]
         mo_e1_a, mo_e1_b = mo_e1_a[0], mo_e1_b[0]
     return (mo1_a, mo1_b), (mo_e1_a, mo_e1_b)
+
+def solve_residual(fvind, mo_energy, mo_occ, h1, s1, max_cycle=50, tol=1e-4,
+                   verbose=logger.WARN, level_shift=0, scale_trials=False,
+                   x0=None, trials=None, second_order=None):
+    '''cphf.solve_residual for unrestricted orbitals: the equations of
+    solve_withs1 for real orbitals and perturbations, solved until the true
+    residual of every perturbation is below tol. The trial vectors are those of
+    the alpha and beta virtual blocks together, on which the operator
+    (e_a - e_i) + fvind is symmetric. See cphf.solve_residual for the method
+    and the arguments. fvind takes and returns the alpha and beta blocks
+    [nset,nmo,nocc] of each spin side by side, [nset, nmo nocc_a + nmo nocc_b].
+    x0 is the pair of the virtual blocks to start from, and trials gets and
+    returns the alpha and beta virtual blocks side by side, as second_order
+    does.
+
+    Returns:
+        First order orbital coefficients (in MO basis) and first order orbital
+        energy matrix, each for alpha and beta
+    '''
+    from gpu4pyscf.scf import cphf
+    assert not any(cupy.iscomplexobj(x) for x in (h1[0], h1[1], s1[0], s1[1]))
+    log = logger.new_logger(verbose=verbose)
+    t0 = log.init_timer()
+
+    mo_energy = [cupy.asarray(mo_energy[k]) for k in range(2)]
+    occidx = [cupy.asarray(mo_occ[0]) > 0, cupy.asarray(mo_occ[1]) > 0]
+    viridx = [~occidx[0], ~occidx[1]]
+    e_i = [mo_energy[k][occidx[k]] for k in range(2)]
+    e_a = [mo_energy[k][viridx[k]] for k in range(2)]
+    e_ai = [e_a[k][:,None] - e_i[k] for k in range(2)]
+    nocc = [e_ai[k].shape[1] for k in range(2)]
+    nmo = [occidx[0].size, occidx[1].size]
+    diag = cupy.hstack([e_ai[0].ravel(), e_ai[1].ravel()])
+    precond = diag + level_shift
+
+    s1 = [cupy.asarray(s1[k]).reshape(-1,nmo[k],nocc[k]) for k in range(2)]
+    nset = s1[0].shape[0]
+    hs = [cupy.asarray(h1[k]).reshape(nset,nmo[k],nocc[k]) - s1[k]*e_i[k] for k in range(2)]
+
+    def pack(xa, xb):
+        return cupy.hstack((xa.reshape(len(xa),-1), xb.reshape(len(xb),-1)))
+    def unpack(x):
+        n = len(x)
+        na = nmo[0] * nocc[0]
+        return [x[:,:na].reshape(n,nmo[0],nocc[0]), x[:,na:].reshape(n,nmo[1],nocc[1])]
+    def vir_rows(x):
+        return pack(x[0][:,viridx[0]], x[1][:,viridx[1]])
+    def occ_rows(x):
+        return pack(x[0][:,occidx[0]], x[1][:,occidx[1]])
+    def add_rows(x, idx, rows):
+        # rows of the alpha and beta blocks together, added to x[k][:,idx[k]]
+        p0 = 0
+        for k in range(2):
+            shape = x[k][:,idx[k]].shape
+            p1 = p0 + shape[1] * shape[2]
+            x[k][:,idx[k]] += rows[:,p0:p1].reshape(shape)
+            p0 = p1
+
+    mo1 = [cupy.empty_like(hs[k]) for k in range(2)]
+    for k in range(2):
+        if x0 is None:
+            mo1[k][:,viridx[k]] = -hs[k][:,viridx[k]] / e_ai[k]
+        else:
+            mo1[k][:,viridx[k]] = cupy.asarray(x0[k]).reshape(nset,-1,nocc[k])
+        mo1[k][:,occidx[k]] = -s1[k][:,occidx[k]] * .5
+    v1 = unpack(cupy.array(fvind(pack(*mo1)).reshape(nset,-1)))
+    # -(e_ai x0 + fvind(x0) + hs) on the virtual blocks
+    if x0 is None:
+        r0 = -vir_rows(v1)
+    else:
+        r0 = -(vir_rows(v1) + vir_rows(hs) + vir_rows(mo1) * diag)
+
+    vs = []  # the trial vectors V, a block per cycle
+    mvs = []  # M V
+    voo = []  # the occupied rows of fvind(V), for the first order energies
+    vtmv = numpy.zeros((0,0))
+    vtr0 = numpy.zeros((0,nset))
+    c = vtr0
+    r = r0
+    drop = max(tol*1e-2, 1e-13)
+    for cycle in range(max_cycle+1):
+        rnorm = cupy.linalg.norm(r / precond, axis=1).get()
+        active = rnorm > tol
+        log.info('CPHF cycle %d: max residual %g, %d of %d perturbations left',
+                 cycle, rnorm.max(initial=0), active.sum(), nset)
+        if not active.any():
+            break
+        if cycle == max_cycle:
+            raise RuntimeError('CPHF solver failed to converge.')
+
+        t = r[cupy.asarray(numpy.where(active)[0])]
+        if trials is None:
+            t = t / precond
+        else:
+            t = cupy.array(trials(t), dtype=cupy.float64, order='C').reshape(-1,diag.size)
+        x1, sizes = cphf._orthonormal_rows(t, vs, drop)
+        t = None
+        nq = len(x1)
+        if nq == 0:
+            log.warn('CPHF stopped with no new trial vector; residual %g '
+                     'above tol %g', rnorm.max(), tol)
+            break
+        scale = 1.
+        if scale_trials:
+            scale = cupy.asarray(numpy.maximum(sizes, 1e-6)).reshape(nq,1)
+        trial = [cupy.zeros((nq,nmo[k],nocc[k])) for k in range(2)]
+        add_rows(trial, viridx, x1 * scale)
+        w = unpack(cupy.array(fvind(pack(*trial)).reshape(nq,-1)) / scale)
+        trial = None
+        mx1 = vir_rows(w) + x1 * diag
+        voo.append(occ_rows(w))
+        w = None
+        vs.append(x1)
+        mvs.append(mx1)
+
+        nd = vtmv.shape[0]
+        vtmv1 = numpy.empty((nd+nq,nd+nq))
+        vtmv1[:nd,:nd] = vtmv
+        p0 = 0
+        for v, mv in zip(vs, mvs):
+            p1 = p0 + len(v)
+            vtmv1[p0:p1,nd:] = v.dot(mx1.T).get()
+            vtmv1[nd:,p0:p1] = x1.dot(mv.T).get()
+            p0 = p1
+        vtmv = vtmv1
+        vtr0 = numpy.vstack((vtr0, x1.dot(r0.T).get()))
+        c = numpy.linalg.solve(vtmv, vtr0)
+        r = r0 - cphf._combine_blocks(c, mvs)
+
+    nvec = vtmv.shape[0]
+    log.info('CPHF: %d cycles, %d trial vectors, max residual %.3g',
+             cycle, nvec, float(cupy.linalg.norm(r / precond, axis=1).max()) if nset else 0.)
+    if vs:
+        xv = cphf._combine_blocks(c, vs)
+        add_rows(mo1, viridx, xv)
+        # fvind(mo1), from the responses of x0 and of the trial vectors
+        add_rows(v1, viridx, cphf._combine_blocks(c, mvs) - xv * diag)
+        add_rows(v1, occidx, cphf._combine_blocks(c, voo))
+    log.timer('CPHF solver', *t0)
+    if second_order is not None:
+        second_order.append((vir_rows(mo1) + vir_rows(hs) / diag, r))
+
+    mo_e1 = []
+    for k in range(2):
+        hs[k] += v1[k]
+        mo1[k][:,viridx[k]] = hs[k][:,viridx[k]] / (e_i[k] - e_a[k][:,None])
+        e1 = hs[k][:,occidx[k]]
+        e1 += mo1[k][:,occidx[k]] * (e_i[k][:,None] - e_i[k])
+        mo_e1.append(e1)
+    return (mo1[0], mo1[1]), (mo_e1[0], mo_e1[1])
+
