@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from functools import reduce
+from pyscf import lib
 from pyscf.hessian import thermo
 import numpy as np
 import cupy
@@ -23,6 +24,9 @@ from gpu4pyscf.lib.cupy_helper import contract
 from gpu4pyscf.scf.hf import RHF
 
 LINDEP_THRESHOLD = 1e-7
+# The residual to which the CPHF equations are solved for the dipole
+# derivatives, where the Hessian object's cphf_residual_tol is looser
+CPHF_RESIDUAL_TOL = 1e-6
 
 
 def eval_ir_freq_intensity(mf, hessian_obj):
@@ -98,8 +102,14 @@ def eval_ir_freq_intensity(mf, hessian_obj):
     # TODO: compact with hessian method, which can save one time cphf solve.
     # ! Different from PySCF, mo1 is all in mo!
     fx = hessian_obj.gen_vind(mo_coeff, mo_occ)
-    mo1, mo_e1 = hessian_obj.solve_mo1(mo_energy, mo_coeff, mo_occ, h1ao,
-                                       fx, atmlst, hessian_obj.max_memory, log)  
+    # The dipole derivatives are linear in the CPHF solution, where the Hessian
+    # takes it at second order: a tighter residual than the Hessian's
+    tol = getattr(hessian_obj, 'cphf_residual_tol', None)
+    if tol is not None:
+        tol = min(tol, CPHF_RESIDUAL_TOL)
+    with lib.temporary_env(hessian_obj, cphf_residual_tol=tol):
+        mo1, mo_e1 = hessian_obj.solve_mo1(mo_energy, mo_coeff, mo_occ, h1ao,
+                                           fx, atmlst, hessian_obj.max_memory, log)
     mo1 = cupy.asarray(mo1)
     mo_e1 = cupy.asarray(mo_e1)
 

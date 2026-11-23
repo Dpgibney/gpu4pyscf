@@ -83,14 +83,20 @@ def hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
             # Reduce GPU memory footprint
             h1mo = h1mo.get()
         t1 = log.timer_debug1('making H1', *t1)
+    de2_second_order = None
     if mo1 is None or mo_e1 is None:
         fx = hessobj.gen_vind(mo_coeff, mo_occ)
         mo1, mo_e1 = hessobj.solve_mo1(mo_energy, mo_coeff, mo_occ, h1mo,
                                        fx, atmlst, max_memory, log)
+        # what takes the terms of these orbitals to second order in the
+        # residuals of the CPHF equations (solve_mo1)
+        de2_second_order = hessobj.__dict__.pop('_cphf_second_order', None)
         t1 = log.timer_debug1('solving MO1', *t1)
     mo1 = cupy.asarray(mo1)
     # *2 for double occupancy, *2 for +c.c.
     de2 += contract('kxpi,lypi->klxy', cupy.asarray(h1mo), mo1) * 4
+    if de2_second_order is not None:
+        de2 += cupy.asarray(de2_second_order)
     mo1 = contract('kxai,pa->kxpi', mo1, mo_coeff)
     mo_e1 = cupy.asarray(mo_e1)
 
@@ -666,7 +672,8 @@ def get_ovlp(mol):
 
 def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
               fx=None, atmlst=None, max_memory=4000, verbose=None,
-              max_cycle=50, level_shift=0):
+              max_cycle=50, level_shift=0, residual_tol=None, scale_trials=False,
+              fx_cheap=None, second_order=None):
     '''Solve the CPHF equation for the first orbitals.
     Note: These orbitals are represented in MO basis. This is different to the
     solve_mo1 function in the PySCF CPU version, which transforms the mo1 to AO
@@ -678,6 +685,29 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
         fx : function(dm_mo) => v1_mo
             A function to generate the induced potential.
             See also the function gen_vind.
+        residual_tol : float
+            If set, solve with cphf.solve_residual to this tolerance, otherwise
+            with the Krylov solver to mf.conv_tol_cpscf times the atoms of a
+            block. Hessian objects pass their cphf_residual_tol
+        scale_trials : bool
+            scale_trials of cphf.solve_residual
+        fx_cheap : function(dm_mo) => v1_mo
+            The induced potential of a cheaper model (with residual_tol). The
+            equations of this model are solved first, and the solver for fx
+            starts from their solution and takes its trial vectors from this
+            model's corrections of its residuals: fx is then evaluated for
+            the start and for one or two sets of trial vectors, and the
+            solution is that of fx to residual_tol.
+        second_order : dict
+            Gets 'de2' [natm,natm,3,3] (with residual_tol): what hess_elec
+            adds to the terms it takes from these orbitals, so that they are
+            right to second order in the residuals of the equations. With x
+            the solution, x0 the uncoupled one and r the residual, the terms
+            of the perturbations A and B are off by 4 (x_A - x0_A) r_B at
+            first order: nothing for the plain solver on one block of atoms
+            (r is orthogonal to the trial vectors that x - x0 is made of),
+            but not for a start from a cheaper model's solution, nor between
+            two blocks.
     '''
     from gpu4pyscf.pbc.gto import int1e
     mol = mf.mol
@@ -727,6 +757,7 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
     mo1s = np.zeros(h1mo.shape)
     e1s = np.zeros((natm, 3, nocc, nocc))
     aoslices = mol.aoslice_by_atom()
+    kept = [] if second_order is not None else None
     for i0, i1 in lib.prange(0, natm, blksize):
         log.info('Solving CPHF equation for atoms [%d:%d]', i0, i1)
 
@@ -738,6 +769,28 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
             s1ao[:,:,p0:p1] += ipovlp[:,p0:p1].transpose(0,2,1)
             tmp = contract('xij,jo->xio', s1ao, mocc)
             s1mo_blk[k] = contract('xio,ip->xpo', tmp, mo_coeff)
+
+        if residual_tol is not None:
+            nset = (i1 - i0) * 3
+            x0 = trials = None
+            if fx_cheap is not None:
+                x0, trials = _cheap_start_and_trials(
+                    fx_cheap, mo_energy, mo_occ, h1mo_blk.reshape(nset,nmo,nocc),
+                    s1mo_blk.reshape(nset,nmo,nocc), max_cycle, residual_tol,
+                    level_shift, log, scale_trials)
+            mo1, mo_e1 = cphf.solve_residual(
+                fx, mo_energy, mo_occ, h1mo_blk.reshape(nset,nmo,nocc),
+                s1mo_blk.reshape(nset,nmo,nocc), max_cycle=max_cycle,
+                tol=residual_tol, verbose=log, level_shift=level_shift,
+                scale_trials=scale_trials, x0=x0, trials=trials,
+                second_order=kept)
+            mo1s[i0:i1] = mo1.reshape(i1-i0,3,nmo,nocc).get()
+            e1s[i0:i1] = mo_e1.reshape(i1-i0,3,nocc,nocc).get()
+            mo1 = mo_e1 = s1mo_blk = h1mo_blk = None
+            if kept and blksize < natm:
+                # several blocks: off the device until all are solved
+                kept[-1] = tuple(x.get() for x in kept[-1])
+            continue
 
         mo1 = hs = h1mo_blk - s1mo_blk * e_i
         mo_e1 = hs[:,:,occidx]
@@ -760,8 +813,73 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
         mo1s[i0:i1] = mo1.get()
         e1s[i0:i1] = mo_e1.get()
         mo1 = raw_mo1 = mo_e1 = v1 = None
+    if kept:
+        second_order['de2'] = _second_order_term(kept, natm, 4.)
     log.timer('CPHF solver', *t0)
     return mo1s, e1s
+
+def _second_order_term(kept, natm, factor):
+    '''-factor (x_A - x0_A) r_B as [natm,natm,3,3], from the pairs (x - x0, r)
+    of the blocks of perturbations (second_order of cphf.solve_residual): see
+    solve_mo1'''
+    n = sum(len(d) for d, r in kept)
+    assert n == natm * 3
+    w = cupy.empty((n,n))
+    p0 = 0
+    for d, _ in kept:
+        p1 = p0 + len(d)
+        d = cupy.asarray(d)
+        q0 = 0
+        for _, r in kept:
+            q1 = q0 + len(r)
+            w[p0:p1,q0:q1] = d.dot(cupy.asarray(r).T)
+            q0 = q1
+        p0 = p1
+    w *= -factor
+    return w.reshape(natm,3,natm,3).transpose(0,2,1,3)
+
+# A correction step of the two-level CPHF, for the perturbations whose residual
+# with the model's own response is above the tolerance: where the largest of
+# these residuals is within this factor of the tolerance, the trial vectors are
+# the preconditioned residuals, as in the plain solver, whose step takes a
+# residual down by an order of magnitude (one more response of the model, none
+# of the cheap model); beyond it, the cheap model's solutions for the residuals
+# (several responses of the cheap model, each with the model's own J and K by
+# default).
+TWO_LEVEL_PLAIN_STEP = 4.
+
+def _cheap_start_and_trials(fx_cheap, mo_energy, mo_occ, h1, s1, max_cycle, tol,
+                            level_shift, log, scale_trials=False):
+    '''x0 and trials of cphf.solve_residual from the response fx_cheap of a
+    cheaper model: the virtual block of that model's solution, and, for a set
+    of residuals r, its solutions d of ((e_a - e_i) + fx_cheap) d = r, to a
+    fifth of the tolerance or a hundredth of their size (the preconditioned
+    residuals where they are small, see TWO_LEVEL_PLAIN_STEP). scale_trials:
+    as for the model's own solver.'''
+    viridx = mo_occ == 0
+    nset, nmo, nocc = h1.shape
+    e_ai = mo_energy[viridx][:,None] - mo_energy[mo_occ > 0]
+    nvir = e_ai.shape[0]
+    log.info('CPHF: the cheap model')
+    x0 = cphf.solve_residual(fx_cheap, mo_energy, mo_occ, h1, s1, max_cycle=max_cycle,
+                             tol=tol, verbose=log, level_shift=level_shift,
+                             scale_trials=scale_trials)[0][:,viridx]
+
+    def trials(r):
+        n = len(r)
+        size = float(cupy.linalg.norm(r / e_ai.ravel(), axis=1).max())
+        if size <= tol * TWO_LEVEL_PLAIN_STEP:
+            log.info('CPHF: %d residuals of size %.3g, preconditioned', n, size)
+            return r / (e_ai.ravel() + level_shift)
+        h = cupy.zeros((n,nmo,nocc))
+        h[:,viridx] = -r.reshape(n,nvir,nocc)
+        log.info('CPHF: the cheap model for %d residuals of size %.3g', n, size)
+        d = cphf.solve_residual(fx_cheap, mo_energy, mo_occ, h, cupy.zeros_like(h),
+                                max_cycle=max_cycle, tol=max(tol*.2, size*1e-2),
+                                verbose=log, level_shift=level_shift,
+                                scale_trials=scale_trials)[0]
+        return d[:,viridx].reshape(n,-1)
+    return x0, trials
 
 def gen_vind(hessobj, mo_coeff, mo_occ):
     mol = hessobj.mol
@@ -919,7 +1037,35 @@ class HessianBase(lib.StreamObject):
     # attributes
     max_cycle   = rhf_hess_cpu.HessianBase.max_cycle
     level_shift = rhf_hess_cpu.HessianBase.level_shift
-    _keys       = rhf_hess_cpu.HessianBase._keys
+    # The CPHF equations are solved until the residual of every perturbation,
+    # divided by the orbital energy differences, is below this
+    # (cphf.solve_residual). None: the Krylov solver, to base.conv_tol_cpscf
+    # times the atoms of a block, which stops on the size of its vectors and
+    # short of a converged solution for DFT.
+    cphf_residual_tol = getattr(__config__, 'hessian_rhf_cphf_residual_tol', 1e-4)
+    # Two-level CPHF (with cphf_residual_tol): the equations of a cheap model
+    # are solved first, and the model's own response is then built for that
+    # solution, and for the cheap model's corrections of its residuals where
+    # these are above cphf_residual_tol: once or twice where the plain solver
+    # builds it in every cycle. The solution is the model's own, to
+    # cphf_residual_tol. False: the plain solver.
+    cphf_two_level = getattr(__config__, 'hessian_rhf_cphf_two_level', True)
+    # The parts of the response that the cheap model takes on its own terms
+    # (hessian.rks._gen_vind_cheap): 'nlc', the VV10 term on the grids of
+    # cphf_two_level_nlcgrids_level, whose all-pairs kernel is most of a
+    # response and whose coarse grid leaves the residuals below the default
+    # tolerance, so that the model's own response is built once; 'xc', the XC
+    # term on the grids of cphf_two_level_grids_level, and 'k', the
+    # seminumerical exchange of scf.two_level, which each cost a second
+    # response of the model and save less than that for small basis sets.
+    # Without a cheap model (no VV10 term, for the default) the solver is the
+    # plain one.
+    cphf_two_level_parts = getattr(__config__, 'hessian_rhf_cphf_two_level_parts', ('nlc',))
+    cphf_two_level_grids_level = getattr(__config__, 'hessian_rhf_cphf_two_level_grids_level', 0)
+    cphf_two_level_nlcgrids_level = getattr(__config__, 'hessian_rhf_cphf_two_level_nlcgrids_level', 0)
+    _keys       = rhf_hess_cpu.HessianBase._keys | {
+        'cphf_residual_tol', 'cphf_two_level', 'cphf_two_level_parts',
+        'cphf_two_level_grids_level', 'cphf_two_level_nlcgrids_level'}
 
     # methods
     hess_elec       = rhf_hess_cpu.HessianBase.hess_elec
@@ -934,9 +1080,22 @@ class HessianBase(lib.StreamObject):
 
     def solve_mo1(self, mo_energy, mo_coeff, mo_occ, h1mo,
                   fx=None, atmlst=None, max_memory=4000, verbose=None):
-        return solve_mo1(self.base, mo_energy, mo_coeff, mo_occ, h1mo,
-                         fx, atmlst, max_memory, verbose,
-                         max_cycle=self.max_cycle, level_shift=self.level_shift)
+        # The J and K of direct SCF skip more for the smaller trial vectors of
+        # the later cycles; density fitting has no such screening to gain from.
+        scale_trials = getattr(self.base, 'with_df', None) is None
+        fx_cheap = None
+        if (self.cphf_two_level and self.cphf_residual_tol is not None
+                and getattr(self, 'gen_vind_cheap', None) is not None):
+            fx_cheap = self.gen_vind_cheap(mo_coeff, mo_occ)
+        second_order = {}
+        out = solve_mo1(self.base, mo_energy, mo_coeff, mo_occ, h1mo,
+                        fx, atmlst, max_memory, verbose,
+                        max_cycle=self.max_cycle, level_shift=self.level_shift,
+                        residual_tol=self.cphf_residual_tol, scale_trials=scale_trials,
+                        fx_cheap=fx_cheap, second_order=second_order)
+        # for hess_elec, which takes it when it has called this function
+        self._cphf_second_order = second_order.get('de2')
+        return out
 
     def dump_flags(self, verbose=None):
         log = logger.new_logger(self, verbose)

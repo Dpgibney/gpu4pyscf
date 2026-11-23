@@ -25,7 +25,7 @@ import numpy as np
 import cupy
 import cupy as cp
 from pyscf import lib
-from gpu4pyscf.scf import j_engine
+from gpu4pyscf.scf import j_engine, ucphf
 from gpu4pyscf.scf.jk import _VHFOpt, _check_rsh_factors
 from gpu4pyscf.gto.ecp import get_ecp_ip
 from gpu4pyscf.lib.cupy_helper import (
@@ -68,16 +68,21 @@ def hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
             # Reduce GPU memory footprint
             h1mo = (h1mo[0].get(), h1mo[1].get())
         t1 = log.timer_debug1('making H1', *t1)
+    de2_second_order = None
     if mo1 is None or mo_e1 is None:
         fx = hessobj.gen_vind(mo_coeff, mo_occ)
         mo1, mo_e1 = hessobj.solve_mo1(mo_energy, mo_coeff, mo_occ, h1mo,
                                        fx, atmlst, max_memory, log)
+        # see hessian.rhf.hess_elec
+        de2_second_order = hessobj.__dict__.pop('_cphf_second_order', None)
         t1 = log.timer_debug1('solving MO1', *t1)
 
     mo1a = cupy.asarray(mo1[0])
     mo1b = cupy.asarray(mo1[1])
     de2 += contract('kxpi,lypi->klxy', cupy.asarray(h1mo[0]), mo1a) * 2
     de2 += contract('kxpi,lypi->klxy', cupy.asarray(h1mo[1]), mo1b) * 2
+    if de2_second_order is not None:
+        de2 += cupy.asarray(de2_second_order)
     mo1a = contract('kxai,pa->kxpi', mo1a, mo_coeff[0])
     mo1b = contract('kxai,pa->kxpi', mo1b, mo_coeff[1])
 
@@ -199,7 +204,8 @@ def make_h1(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None, verbose=None):
 
 def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
               fx=None, atmlst=None, max_memory=4000, verbose=None,
-              max_cycle=50, level_shift=0):
+              max_cycle=50, level_shift=0, residual_tol=None, scale_trials=False,
+              fx_cheap=None, second_order=None):
     '''Solve the CPHF equation for the first orbitals.
     Note: These orbitals are represented in MO basis. This is different to the
     solve_mo1 function in the PySCF CPU version, which transforms the mo1 to AO
@@ -209,6 +215,17 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
         fx : function(dm_mo) => v1_mo
             A function to generate the induced potential.
             See also the function gen_vind.
+        residual_tol : float
+            If set, solve with ucphf.solve_residual to this tolerance, otherwise
+            with the Krylov solver to mf.conv_tol_cpscf times the atoms of a
+            block. Hessian objects pass their cphf_residual_tol
+        scale_trials : bool
+            scale_trials of cphf.solve_residual
+        fx_cheap : function(dm_mo) => v1_mo
+            The induced potential of a cheaper model, see hessian.rhf.solve_mo1
+        second_order : dict
+            As in hessian.rhf.solve_mo1 (the factor is 2, for the two spins
+            together)
     '''
     from gpu4pyscf.pbc.gto import int1e
     mol = mf.mol
@@ -272,6 +289,7 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
     e1sa = np.zeros((natm, 3, nocca, nocca))
     e1sb = np.zeros((natm, 3, noccb, noccb))
     aoslices = mol.aoslice_by_atom()
+    kept = [] if second_order is not None else None
     for i0, i1 in lib.prange(0, natm, blksize):
         log.info('Solving CPHF equation for atoms [%d:%d]', i0, i1)
 
@@ -290,6 +308,31 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
             s1a_blk[k] = contract('xio,ip->xpo', tmp, mo_coeff[0])
             tmp = contract('xij,jo->xio', s1ao, moccb)
             s1b_blk[k] = contract('xio,ip->xpo', tmp, mo_coeff[1])
+
+        if residual_tol is not None:
+            nset = (i1 - i0) * 3
+            h1 = (h1a_blk.reshape(nset,nmo,nocca), h1b_blk.reshape(nset,nmo,noccb))
+            s1 = (s1a_blk.reshape(nset,nmo,nocca), s1b_blk.reshape(nset,nmo,noccb))
+            x0 = trials = None
+            if fx_cheap is not None:
+                x0, trials = _cheap_start_and_trials(
+                    fx_cheap, (mo_ea, mo_eb), mo_occ, h1, s1, max_cycle,
+                    residual_tol, level_shift, log, scale_trials)
+            (mo1a, mo1b), (mo_e1a, mo_e1b) = ucphf.solve_residual(
+                fx, (mo_ea, mo_eb), mo_occ, h1, s1,
+                max_cycle=max_cycle, tol=residual_tol, verbose=log,
+                level_shift=level_shift, scale_trials=scale_trials,
+                x0=x0, trials=trials, second_order=kept)
+            h1 = s1 = None
+            if kept and blksize < natm:
+                kept[-1] = tuple(x.get() for x in kept[-1])
+            mo1sa[i0:i1] = mo1a.reshape(i1-i0,3,nmo,nocca).get()
+            mo1sb[i0:i1] = mo1b.reshape(i1-i0,3,nmo,noccb).get()
+            e1sa[i0:i1] = mo_e1a.reshape(i1-i0,3,nocca,nocca).get()
+            e1sb[i0:i1] = mo_e1b.reshape(i1-i0,3,noccb,noccb).get()
+            mo1a = mo1b = mo_e1a = mo_e1b = None
+            h1a_blk = h1b_blk = s1a_blk = s1b_blk = None
+            continue
 
         mo1a = hs_a = h1a_blk - s1a_blk * ei_a
         mo1b = hs_b = h1b_blk - s1b_blk * ei_b
@@ -331,8 +374,43 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
         mo1a = mo1b = mo1 = mo_e1a = mo_e1b = None
         raw_mo1a = raw_mo1b = raw_mo1 = None
         v1a = v1b = v1 = None
+    if kept:
+        second_order['de2'] = rhf_hess_gpu._second_order_term(kept, natm, 2.)
     log.timer('CPHF solver', *t0)
     return (mo1sa, mo1sb), (e1sa, e1sb)
+
+def _cheap_start_and_trials(fx_cheap, mo_energy, mo_occ, h1, s1, max_cycle, tol,
+                            level_shift, log, scale_trials=False):
+    '''hessian.rhf._cheap_start_and_trials for unrestricted orbitals'''
+    vir = [mo_occ[k] == 0 for k in range(2)]
+    e_ai = [mo_energy[k][vir[k]][:,None] - mo_energy[k][mo_occ[k] > 0] for k in range(2)]
+    diag = cupy.hstack((e_ai[0].ravel(), e_ai[1].ravel()))
+    nset, nmo = h1[0].shape[:2]
+    nocc = [h1[k].shape[2] for k in range(2)]
+    ndima = e_ai[0].size
+    log.info('CPHF: the cheap model')
+    mo1 = ucphf.solve_residual(fx_cheap, mo_energy, mo_occ, h1, s1, max_cycle=max_cycle,
+                               tol=tol, verbose=log, level_shift=level_shift,
+                               scale_trials=scale_trials)[0]
+    x0 = (mo1[0][:,vir[0]], mo1[1][:,vir[1]])
+
+    def trials(r):
+        n = len(r)
+        size = float(cupy.linalg.norm(r / diag, axis=1).max())
+        if size <= tol * rhf_hess_gpu.TWO_LEVEL_PLAIN_STEP:
+            log.info('CPHF: %d residuals of size %.3g, preconditioned', n, size)
+            return r / (diag + level_shift)
+        h = [cupy.zeros((n,nmo,nocc[k])) for k in range(2)]
+        h[0][:,vir[0]] = -r[:,:ndima].reshape(n,-1,nocc[0])
+        h[1][:,vir[1]] = -r[:,ndima:].reshape(n,-1,nocc[1])
+        log.info('CPHF: the cheap model for %d residuals of size %.3g', n, size)
+        d = ucphf.solve_residual(fx_cheap, mo_energy, mo_occ, h,
+                                 [cupy.zeros_like(h[0]), cupy.zeros_like(h[1])],
+                                 max_cycle=max_cycle, tol=max(tol*.2, size*1e-2),
+                                 verbose=log, level_shift=level_shift,
+                                 scale_trials=scale_trials)[0]
+        return cupy.hstack((d[0][:,vir[0]].reshape(n,-1), d[1][:,vir[1]].reshape(n,-1)))
+    return x0, trials
 
 def gen_vind(hessobj, mo_coeff, mo_occ):
     mol = hessobj.mol
@@ -448,9 +526,20 @@ class Hessian(rhf_hess_gpu.HessianBase):
 
     def solve_mo1(self, mo_energy, mo_coeff, mo_occ, h1mo,
                   fx=None, atmlst=None, max_memory=4000, verbose=None):
-        return solve_mo1(self.base, mo_energy, mo_coeff, mo_occ, h1mo,
-                         fx, atmlst, max_memory, verbose,
-                         max_cycle=self.max_cycle, level_shift=self.level_shift)
+        # see rhf.HessianBase.solve_mo1
+        scale_trials = getattr(self.base, 'with_df', None) is None
+        fx_cheap = None
+        if (self.cphf_two_level and self.cphf_residual_tol is not None
+                and getattr(self, 'gen_vind_cheap', None) is not None):
+            fx_cheap = self.gen_vind_cheap(mo_coeff, mo_occ)
+        second_order = {}
+        out = solve_mo1(self.base, mo_energy, mo_coeff, mo_occ, h1mo,
+                        fx, atmlst, max_memory, verbose,
+                        max_cycle=self.max_cycle, level_shift=self.level_shift,
+                        residual_tol=self.cphf_residual_tol, scale_trials=scale_trials,
+                        fx_cheap=fx_cheap, second_order=second_order)
+        self._cphf_second_order = second_order.get('de2')
+        return out
 
     gen_hop = NotImplemented
 

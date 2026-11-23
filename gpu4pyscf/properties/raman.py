@@ -77,6 +77,10 @@ def polarizability_derivative_numerical_dEdE(mf, dE = 2.5e-3):
 
             mf.with_solvent.equilibrium_solvation = True
             hess_obj = mf.Hessian()
+            # the first-order density is used linearly: a tighter residual of the
+            # CPHF equations than a Hessian's (see properties.ir)
+            if getattr(hess_obj, 'cphf_residual_tol', None) is not None:
+                hess_obj.cphf_residual_tol = min(hess_obj.cphf_residual_tol, 1e-6)
             mo_coeff = mf.mo_coeff
             mo_occ = mf.mo_occ
             mo_energy = mf.mo_energy

@@ -824,6 +824,57 @@ def get_d3mu_dr3(ao):
 
     return d3mu_dr3
 
+def _hess_elec_sharing_nlc(hess_elec):
+    '''hess_elec within which the NLC terms of partial_hess_elec (_get_enlc_deriv2) and of make_h1
+    (_get_vnlc_deriv1) share the grids with the points of each atom together and the pair sums f_t of the nuclear
+    derivatives of the density: the dictionary _nlc_shared of the Hessian object, for the one set of orbitals
+    that hess_elec is called with'''
+    def hess_elec_nlc(hessobj, *args, **kwargs):
+        if not hessobj.base.do_nlc():
+            return hess_elec(hessobj, *args, **kwargs)
+        hessobj._nlc_shared = {}
+        try:
+            return hess_elec(hessobj, *args, **kwargs)
+        finally:
+            del hessobj._nlc_shared
+    return hess_elec_nlc
+
+def _nlc_grids_by_atom(mf, mol, shared = None):
+    '''A copy of the NLC grids of mf with the points of each atom together, and a NumInt object for it; kept in
+    the dictionary shared, if given'''
+    if shared is not None and 'grids' in shared:
+        return shared['grids']
+    grids = mf.nlcgrids.copy()
+    grids.build(sort_grids_of_each_atom = True)
+
+    ni = numint.NumInt()
+    ni.gdftopt = None
+    ni.build(mol, grids.coords)
+    if shared is not None:
+        shared['grids'] = (grids, ni)
+    return grids, ni
+
+def _keep_nlc_f_t(shared, kind, mo_coeff, rho_nonzero_mask, f_rho_t, f_gamma_t):
+    '''Keeps f_t of the nuclear derivatives of the density (kind 'orbital': without the response of the grid,
+    'full': with it) for _get_vnlc_deriv1, off the device'''
+    if shared is not None:
+        shared['f_t'] = (kind, mo_coeff, rho_nonzero_mask, cupy.asnumpy(f_rho_t), cupy.asnumpy(f_gamma_t))
+
+def _kept_nlc_f_t(shared, mo_coeff, rho_nonzero_mask):
+    '''(kind, f_rho_t, f_gamma_t) that _get_enlc_deriv2 kept for these orbitals and grid points, on the
+    device, or None'''
+    if shared is None or 'f_t' not in shared:
+        return None
+    kind, mo_kept, mask, f_rho_t, f_gamma_t = shared.pop('f_t')
+    if mo_kept is not mo_coeff:
+        mo_kept = cupy.asarray(mo_kept)
+        mo_coeff = cupy.asarray(mo_coeff)
+        if mo_kept.shape != mo_coeff.shape or not bool((mo_kept == mo_coeff).all()):
+            return None
+    if mask.shape != rho_nonzero_mask.shape or not bool((mask == rho_nonzero_mask).all()):
+        return None
+    return kind, cupy.asarray(f_rho_t), cupy.asarray(f_gamma_t)
+
 def _get_enlc_deriv2(hessobj, mo_coeff, mo_occ, max_memory, log = None):
     """
         Equation notation follows:
@@ -836,9 +887,12 @@ def _get_enlc_deriv2(hessobj, mo_coeff, mo_occ, max_memory, log = None):
         log = logger.new_logger(hessobj)
     mol = hessobj.mol
     mf = hessobj.base
+    # within hess_elec: the grids and f_t for _get_vnlc_deriv1 (_hess_elec_sharing_nlc)
+    shared = getattr(hessobj, '_nlc_shared', None)
+    mo_coeff_shared = mo_coeff
 
     grids = mf.nlcgrids
-    if not hessobj.grid_response:
+    if not hessobj.grid_response and shared is None:
         if grids.coords is None:
             grids.build()
 
@@ -848,12 +902,8 @@ def _get_enlc_deriv2(hessobj, mo_coeff, mo_occ, max_memory, log = None):
             ni.build(mol, grids.coords)
             opt = ni.gdftopt
     else:
-        grids = grids.copy()
-        grids.build(sort_grids_of_each_atom = True)
-
-        ni = numint.NumInt()
-        ni.gdftopt = None
-        ni.build(mol, grids.coords)
+        # (without the grid response too, where _get_vnlc_deriv1 is to find f_t for the same order of points)
+        grids, ni = _nlc_grids_by_atom(mf, mol, shared)
         opt = ni.gdftopt
 
     _sorted_mol = opt._sorted_mol
@@ -1055,6 +1105,7 @@ def _get_enlc_deriv2(hessobj, mo_coeff, mo_occ, max_memory, log = None):
             ctypes.c_int(ngrids),
             ctypes.c_int(3 * natm),
         )
+        _keep_nlc_f_t(shared, 'orbital', mo_coeff_shared, rho_nonzero_mask, f_rho_A_i, f_gamma_A_i)
 
         d2e += contract("Adg,BDg->ABdD",   drho_dA,   f_rho_A_i * grids_weights)
         d2e += contract("Adg,BDg->ABdD", dgamma_dA, f_gamma_A_i * grids_weights)
@@ -1313,6 +1364,8 @@ def _get_enlc_deriv2(hessobj, mo_coeff, mo_occ, max_memory, log = None):
             ctypes.c_int(ngrids),
             ctypes.c_int(3 * natm),
         )
+        _keep_nlc_f_t(shared, 'full', mo_coeff_shared, rho_nonzero_mask,
+                      f_rho_A_i_full_response, f_gamma_A_i_full_response)
 
         d2e += contract("Adg,BDg->ABdD",   drho_dA_full_response,   f_rho_A_i_full_response * grids_weights)
         d2e += contract("Adg,BDg->ABdD", dgamma_dA_full_response, f_gamma_A_i_full_response * grids_weights)
@@ -2189,13 +2242,19 @@ def _get_vnlc_deriv1(hessobj, mo_coeff, mo_occ, max_memory):
     # if we do not include the grid response term, the analytical and numerical Fock matrix
     # derivative, although only diff by else than 1e-7 (norm 1), can cause a 1e-3 error in hessian,
     # likely because the CPHF converged to a different solution.
-    grid_response = True
+    #
+    # (The CPHF solver of that time stopped on the size of its vectors, short of the solution by about that
+    # much; see HessianBase.cphf_residual_tol. The Hessian objects' nlc_fock_grid_response = False leaves this
+    # term out, as all other terms of a Hessian without grid_response do.)
+    grid_response = getattr(hessobj, 'nlc_fock_grid_response', True)
 
     mol = hessobj.mol
     mf = hessobj.base
+    # within hess_elec: the grids and f_t of _get_enlc_deriv2 (_hess_elec_sharing_nlc)
+    shared = getattr(hessobj, '_nlc_shared', None)
 
     grids = mf.nlcgrids
-    if not grid_response:
+    if not grid_response and shared is None:
         if grids.coords is None:
             grids.build()
 
@@ -2205,12 +2264,7 @@ def _get_vnlc_deriv1(hessobj, mo_coeff, mo_occ, max_memory):
             ni.build(mol, grids.coords)
             opt = ni.gdftopt
     else:
-        grids = grids.copy()
-        grids.build(sort_grids_of_each_atom = True)
-
-        ni = numint.NumInt()
-        ni.gdftopt = None
-        ni.build(mol, grids.coords)
+        grids, ni = _nlc_grids_by_atom(mf, mol, shared)
         opt = ni.gdftopt
 
     _sorted_mol = opt._sorted_mol
@@ -2327,6 +2381,22 @@ def _get_vnlc_deriv1(hessobj, mo_coeff, mo_occ, max_memory):
     dgamma_dA = cupy.empty([natm, 3, ngrids], order = "C")
     dnablarho_dA = cupy.empty([natm, 3, 3, ngrids], order = "C")
 
+    # f_t of these trial densities from _get_enlc_deriv2: all of it, or what is linear in their orbital-response
+    # part, to which the part of the grid response is added below. Its trial densities are nonzero on the points
+    # of the displaced atom only: three for each point, drho_dA_grid and dgamma_dA_grid
+    f_t_kept = _kept_nlc_f_t(shared, mo_coeff, rho_nonzero_mask)
+    if f_t_kept is not None and not grid_response and f_t_kept[0] != 'orbital':
+        # kept with the response of the grid, which is not asked for here
+        f_t_kept = None
+    if (f_t_kept is not None and grid_response and f_t_kept[0] == 'orbital'
+            and not hasattr(libgdft, 'VXC_vv10nlc_hess_eval_f_t_by_atom')):
+        # a compiled library without the kernel for the part of the grid response
+        f_t_kept = None
+    f_t_of_grid_response = grid_response and f_t_kept is not None and f_t_kept[0] == 'orbital'
+    if f_t_of_grid_response:
+        drho_dA_grid   = cupy.empty([3, ngrids], order = "C")
+        dgamma_dA_grid = cupy.empty([3, ngrids], order = "C")
+
     g0_full = 0
     g0_nonzero = 0
     for ao, idx, weight, _ in ni.block_loop(_sorted_mol, grids, deriv = 2):
@@ -2360,6 +2430,11 @@ def _get_vnlc_deriv1(hessobj, mo_coeff, mo_occ, max_memory):
             drho_dA_full = drho_dA_orbital_response
         else:
             drho_dA_full = drho_dA_orbital_response + drho_dA_grid_response
+        if f_t_of_grid_response:
+            own = drho_dA_grid_response[i_atom_of_grids]
+            drho_dA_grid[:, g0_nonzero : g1_nonzero] = own[:, 0, :]
+            dgamma_dA_grid[:, g0_nonzero : g1_nonzero] = 2 * contract("dxg,xg->dg", own[:, 1:4, :], split_drho_dr)
+            del own
         del drho_dA_orbital_response, drho_dA_grid_response
         drho_dA[:, :, g0_nonzero : g1_nonzero] = drho_dA_full[:, :, 0, :]
         dnablarho_dA[:, :, :, g0_nonzero : g1_nonzero] = drho_dA_full[:, :, 1:4, :]
@@ -2374,37 +2449,76 @@ def _get_vnlc_deriv1(hessobj, mo_coeff, mo_occ, max_memory):
     assert g1_full == ngrids_full
     assert g1_nonzero == ngrids
 
-    drho_dA   = cupy.ascontiguousarray(drho_dA)
-    dgamma_dA = cupy.ascontiguousarray(dgamma_dA)
-    f_rho_A_i   = cupy.empty([natm, 3, ngrids], order = "C")
-    f_gamma_A_i = cupy.empty([natm, 3, ngrids], order = "C")
+    if f_t_kept is not None:
+        _, f_rho_A_i, f_gamma_A_i = f_t_kept
+        del f_t_kept
+        if f_t_of_grid_response:
+            grid_offsets_of_atom = cupy.bincount(grids.atm_idx[rho_nonzero_mask], minlength = natm)
+            grid_offsets_of_atom = cupy.cumsum(cupy.concatenate((cupy.array([0]), grid_offsets_of_atom)))
+            grid_offsets_of_atom = cupy.asarray(grid_offsets_of_atom, dtype = cupy.int32)
+            assert int(grid_offsets_of_atom[natm]) == ngrids
+            err = libgdft.VXC_vv10nlc_hess_eval_f_t_by_atom(
+                ctypes.cast(stream.ptr, ctypes.c_void_p),
+                ctypes.cast(f_rho_A_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(f_gamma_A_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(grids_coords.data.ptr, ctypes.c_void_p),
+                ctypes.cast(grids_weights.data.ptr, ctypes.c_void_p),
+                ctypes.cast(rho_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(omega_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(kappa_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(U_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(W_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(A_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(B_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(C_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(domega_drho_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(domega_dgamma_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(dkappa_drho_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(d2omega_drho2_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(d2omega_dgamma2_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(d2omega_drho_dgamma_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(d2kappa_drho2_i.data.ptr, ctypes.c_void_p),
+                ctypes.cast(drho_dA_grid.data.ptr, ctypes.c_void_p),
+                ctypes.cast(dgamma_dA_grid.data.ptr, ctypes.c_void_p),
+                ctypes.cast(grid_offsets_of_atom.data.ptr, ctypes.c_void_p),
+                ctypes.c_int(ngrids),
+                ctypes.c_int(natm),
+            )
+            if err != 0:
+                raise RuntimeError('Failed in VXC_vv10nlc_hess_eval_f_t_by_atom')
+            del drho_dA_grid, dgamma_dA_grid, grid_offsets_of_atom
+    else:
+        drho_dA   = cupy.ascontiguousarray(drho_dA)
+        dgamma_dA = cupy.ascontiguousarray(dgamma_dA)
+        f_rho_A_i   = cupy.empty([natm, 3, ngrids], order = "C")
+        f_gamma_A_i = cupy.empty([natm, 3, ngrids], order = "C")
 
-    libgdft.VXC_vv10nlc_hess_eval_f_t(
-        ctypes.cast(stream.ptr, ctypes.c_void_p),
-        ctypes.cast(f_rho_A_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(f_gamma_A_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(grids_coords.data.ptr, ctypes.c_void_p),
-        ctypes.cast(grids_weights.data.ptr, ctypes.c_void_p),
-        ctypes.cast(rho_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(omega_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(kappa_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(U_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(W_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(A_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(B_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(C_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(domega_drho_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(domega_dgamma_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(dkappa_drho_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(d2omega_drho2_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(d2omega_dgamma2_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(d2omega_drho_dgamma_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(d2kappa_drho2_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(drho_dA.data.ptr, ctypes.c_void_p),
-        ctypes.cast(dgamma_dA.data.ptr, ctypes.c_void_p),
-        ctypes.c_int(ngrids),
-        ctypes.c_int(3 * natm),
-    )
+        libgdft.VXC_vv10nlc_hess_eval_f_t(
+            ctypes.cast(stream.ptr, ctypes.c_void_p),
+            ctypes.cast(f_rho_A_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(f_gamma_A_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(grids_coords.data.ptr, ctypes.c_void_p),
+            ctypes.cast(grids_weights.data.ptr, ctypes.c_void_p),
+            ctypes.cast(rho_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(omega_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(kappa_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(U_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(W_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(A_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(B_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(C_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(domega_drho_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(domega_dgamma_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(dkappa_drho_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(d2omega_drho2_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(d2omega_dgamma2_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(d2omega_drho_dgamma_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(d2kappa_drho2_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(drho_dA.data.ptr, ctypes.c_void_p),
+            ctypes.cast(dgamma_dA.data.ptr, ctypes.c_void_p),
+            ctypes.c_int(ngrids),
+            ctypes.c_int(3 * natm),
+        )
     del drho_dA, dgamma_dA
 
     mo_coeff = opt.sort_orbitals(mo_coeff, axis=[mo_coeff.ndim-2])
@@ -3975,33 +4089,59 @@ def nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo = True, ground_
     ni = mf._numint
     _sorted_mol = opt._sorted_mol
     mol = None
+    # The densities of first-order orbitals carry those orbitals (hessian.rhf.gen_vind): dm = mo1 (2 C_occ)^T
+    # + c.c., or mo1 C_occ^T + c.c. of each spin (hessian.uhf.gen_vind, through nr_uks_fnlc_mo). The trial
+    # densities on the grid and C^T V C_occ are then made of products with nocc columns per density in place of
+    # nao (as _nr_rks_fxc_mo_task for the XC response)
+    with_mocc = (return_in_mo and hasattr(dm1s, 'mo1') and getattr(dm1s, 'symmetrize', 0) == 1
+                 and dm1s.mo1.ndim == mo_coeff.ndim + 1)
+    if with_mocc:
+        mo1_sorted = opt.sort_orbitals(dm1s.mo1, axis=[dm1s.mo1.ndim-2])
     mo_coeff = opt.sort_orbitals(mo_coeff, axis=[mo_coeff.ndim-2])
     stream = cupy.cuda.get_current_stream()
 
-    dm1s_sorted = opt.sort_orbitals(dm1s, axis=[1,2])
-    dm_mask_buf = cupy.empty(nao * nao)
+    if not with_mocc:
+        dm1s_sorted = opt.sort_orbitals(dm1s, axis=[1,2])
+        dm_mask_buf = cupy.empty(nao * nao)
     dm1s = None
 
     if return_in_mo:
         if mo_coeff.ndim == 3:
             mocca = mo_coeff[0][:, mo_occ[0]>0]
             moccb = mo_coeff[1][:, mo_occ[1]>0]
-            vmata = cupy.zeros([n_dm1, mo_coeff.shape[2], mocca.shape[1]])
-            vmatb = cupy.zeros([n_dm1, mo_coeff.shape[2], moccb.shape[1]])
+            if with_mocc:
+                # the spins of the first-order orbitals: (the orbitals that the density is made with, the
+                # first-order orbitals, the occupied orbitals); the beta ones come padded to the alpha count
+                spins = [(mocca, mo1_sorted[0][:, :, :mocca.shape[1]], mocca),
+                         (moccb, mo1_sorted[1][:, :, :moccb.shape[1]], moccb)]
+            else:
+                vmata = cupy.zeros([n_dm1, mo_coeff.shape[2], mocca.shape[1]])
+                vmatb = cupy.zeros([n_dm1, mo_coeff.shape[2], moccb.shape[1]])
         else:
             mocc = mo_coeff[:, mo_occ>0]
-            vmat = cupy.zeros([n_dm1, mo_coeff.shape[1], mocc.shape[1]])
+            if with_mocc:
+                spins = [(2.0 * mocc, mo1_sorted, mocc)]
+            else:
+                vmat = cupy.zeros([n_dm1, mo_coeff.shape[1], mocc.shape[1]])
+        if with_mocc:
+            # V C_occ in the AO basis of the grid blocks; C^T of it at the end
+            vmos = [cupy.zeros([n_dm1, nao, occ.shape[1]]) for _, _, occ in spins]
     else:
         vmat = cupy.zeros([n_dm1, nao, nao])
 
     available_gpu_memory = get_avail_mem()
-    available_gpu_memory = int(available_gpu_memory * 0.25) # Don't use too much gpu memory
+    # Don't use too much gpu memory (the arrays below peak at three quarters of fxc_nbytes_per_dm1)
+    available_gpu_memory = int(available_gpu_memory * 0.4)
     fxc_nbytes_per_dm1 = ((1*6 + 3*2) * ngrids + (1*2 + 3*2) * ngrids_full) * 8
     ndm1_per_batch = int(available_gpu_memory / fxc_nbytes_per_dm1)
     if ndm1_per_batch < 6:
         raise MemoryError(f"Out of GPU memory for NLC response (orbital hessian), available gpu memory = {get_avail_mem()}"
                           f" bytes, nao = {nao}, natm = {_sorted_mol.natm}, ngrids (nonzero rho) = {ngrids}")
     ndm1_per_batch = (ndm1_per_batch + 6 - 1) // 6 * 6
+    if 36 <= ndm1_per_batch < n_dm1:
+        # The kernel of f_t takes 36 trial densities in a pass over the pairs: batches of whole passes (72
+        # densities in batches of 30 are three passes, in batches of 36 two)
+        ndm1_per_batch = ndm1_per_batch // 36 * 36
 
     for i_dm1_batch in range(0, n_dm1, ndm1_per_batch):
         n_dm1_batch = min(ndm1_per_batch, n_dm1 - i_dm1_batch)
@@ -4010,6 +4150,18 @@ def nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo = True, ground_
         g1 = 0
         for ao, idx, weight, _ in ni.block_loop(_sorted_mol, grids, deriv = 1):
             g0, g1 = g1, g1 + weight.size
+            if with_mocc:
+                for k, (mo0, mo1, _) in enumerate(spins):
+                    # (the density and its gradient: xctype "NLC" would leave room for a fifth component)
+                    rho1 = numint.eval_rho4(
+                        _sorted_mol, ao, mo0[idx], mo1[i_dm1_batch : i_dm1_batch + n_dm1_batch, idx],
+                        xctype = "GGA", hermi = 1)
+                    if k == 0:
+                        rho_drho_t[:, :, g0:g1] = rho1
+                    else:
+                        rho_drho_t[:, :, g0:g1] += rho1
+                    rho1 = None
+                continue
             for i_dm in range(n_dm1_batch):
                 dm1_sorted = dm1s_sorted[i_dm + i_dm1_batch, :, :]
                 dm1_masked = take_last2d(dm1_sorted, idx, out = dm_mask_buf)
@@ -4085,6 +4237,37 @@ def nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo = True, ground_
             split_fxc_rho = fxc_rho[:, g0_nonzero : g1_nonzero]
             split_fxc_gamma = fxc_gamma[:, :, g0_nonzero : g1_nonzero]
 
+            if with_mocc:
+                # V = A + A^T, A = ao[0] (sum_k wv[k] ao[k])^T with wv = (fxc_rho / 2, fxc_gamma), so
+                # V C_occ = ao[0] (sum_k wv[k] psi[k])^T + (sum_k wv[k] ao[k]) psi[0]^T, psi = ao C_occ
+                blk_size = ao.shape[2]
+                nao_sub = ao.shape[1]
+                psis = [contract('nig,io->nog', ao, occ[idx]) for _, _, occ in spins]
+                nocc = max(psi.shape[1] for psi in psis)
+                # densities at a time: about 256 MB of intermediates
+                nbatch = max(1, int(2**25 / (blk_size*(nao_sub+2*nocc) + nao_sub*nocc)))
+                for i0 in range(0, n_dm1_batch, nbatch):
+                    i1 = min(i0 + nbatch, n_dm1_batch)
+                    nb = i1 - i0
+                    wvi = cupy.empty((nb, 4, blk_size))
+                    wvi[:, 0] = split_fxc_rho[i0:i1] * .5
+                    wvi[:, 1:] = split_fxc_gamma[i0:i1]
+                    aow = contract('ang,nig->aig', wvi, ao).reshape(nb*nao_sub, blk_size)
+                    for psi, vmo in zip(psis, vmos):
+                        nocc = psi.shape[1]
+                        x = contract('ang,nog->aog', wvi, psi)
+                        v1 = ao[0].dot(x.reshape(nb*nocc, blk_size).T)
+                        x = None
+                        v2 = aow.dot(psi[0].T).reshape(nb, nao_sub, nocc)
+                        v2 += v1.reshape(nao_sub, nb, nocc).transpose(1, 0, 2)
+                        vmo[i_dm1_batch + i0 : i_dm1_batch + i1, idx] += v2
+                        v1 = v2 = None
+                    aow = wvi = None
+                psis = None
+                g0_nonzero = g1_nonzero
+                g0_full = g1_full
+                continue
+
             for i_dm in range(n_dm1_batch):
                 # \mu \nu
                 V_munu = contract("ig,jg->ij", ao[0], ao[0] * split_fxc_rho[i_dm, :])
@@ -4112,10 +4295,18 @@ def nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo = True, ground_
         assert g1_nonzero == ngrids
 
     if return_in_mo and mo_coeff.ndim == 3:
+        if with_mocc:
+            vmata = contract('nio,ip->npo', vmos[0], mo_coeff[0])
+            vmatb = contract('nio,ip->npo', vmos[1], mo_coeff[1])
+            vmos = None
         if output_in_2d:
             vmata = vmata[0]
             vmatb = vmatb[0]
         return (vmata, vmatb)
+
+    if with_mocc:
+        vmat = contract('nio,ip->npo', vmos[0], mo_coeff)
+        vmos = None
 
     if not return_in_mo:
         vmat = opt.unsort_orbitals(vmat, axis=[1,2])
@@ -4123,6 +4314,80 @@ def nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo = True, ground_
     if output_in_2d:
         vmat = vmat[0]
     return vmat
+
+def _nlc_response_scf(hessobj):
+    '''The SCF object whose NLC grids the VV10 response of the CPHF equations is evaluated on: the SCF object
+    of hessobj, or, with cphf_nlcgrids_level, a copy of it with the grids of that level (kept on hessobj)'''
+    mf = hessobj.base
+    level = getattr(hessobj, 'cphf_nlcgrids_level', None)
+    if level is None:
+        return mf
+    from gpu4pyscf.scf import two_level
+    kept = getattr(hessobj, '_nlc_response_mf', None)
+    if kept is not None and kept[0] == level and kept[1] is mf.nlcgrids:
+        return kept[2]
+    grids = two_level.coarse_grids(mf.nlcgrids, hessobj.mol, level)
+    if two_level._same_grids(grids, mf.nlcgrids):
+        return mf
+    mf_nlc = mf.copy()
+    mf_nlc.nlcgrids = grids
+    hessobj._nlc_response_mf = (level, mf.nlcgrids, mf_nlc)
+    return mf_nlc
+
+class _CheapResponse:
+    '''What the response of the cheap model of the two-level CPHF takes in
+    place of the model's own (None: the model's own): the grids of the XC
+    term, an SCF object with the grids of the VV10 term, the seminumerical
+    exchange for K'''
+    def __init__(self):
+        self.grids = None
+        self.mf_nlc = None
+        self.with_sgx = None
+
+def _gen_vind_cheap(hessobj, mo_coeff, mo_occ):
+    '''gen_vind for the cheap model of the two-level CPHF: get_veff_resp_mo
+    with, for the parts named in cphf_two_level_parts, the XC term on the
+    grids of level cphf_two_level_grids_level ('xc'), the VV10 term on those
+    of level cphf_two_level_nlcgrids_level ('nlc'), and the seminumerical K of
+    scf.two_level in place of the four-center one ('k', the SCF object's
+    two_level_sgx_level and two_level_sgx_dtype). J and a solvent's response
+    are the model's own. None where nothing of this is cheaper.'''
+    from gpu4pyscf.scf import two_level
+    mf = hessobj.base
+    mol = hessobj.mol
+    parts = hessobj.cphf_two_level_parts
+    cheap = _CheapResponse()
+    if 'xc' in parts:
+        own = getattr(mf, 'cphf_grids', None)
+        if own is None:
+            own = mf.grids
+        grids = two_level.coarse_grids(own, mol, hessobj.cphf_two_level_grids_level)
+        if not two_level._same_grids(grids, own):
+            cheap.grids = grids
+    if 'nlc' in parts and mf.do_nlc():
+        own = _nlc_response_scf(hessobj).nlcgrids
+        grids = two_level.coarse_grids(own, mol, hessobj.cphf_two_level_nlcgrids_level)
+        if not two_level._same_grids(grids, own):
+            cheap.mf_nlc = mf.copy()
+            cheap.mf_nlc.nlcgrids = grids
+    if ('k' in parts and two_level._direct_k_of_hybrid(mf)
+            and mf.two_level_sgx_level is not None):
+        from gpu4pyscf.sgx import sgx
+        cheap.with_sgx = sgx.SGX(mol)
+        cheap.with_sgx.grids_level = mf.two_level_sgx_level
+        cheap.with_sgx.kernel_dtype = mf.two_level_sgx_dtype
+        cheap.with_sgx.verbose = mf.verbose
+        cheap.with_sgx.stdout = mf.stdout
+    if cheap.grids is None and cheap.mf_nlc is None and cheap.with_sgx is None:
+        return None
+    fx = hessobj.gen_vind(mo_coeff, mo_occ)
+    def fx_cheap(mo1):
+        hessobj._cheap_response = cheap
+        try:
+            return fx(mo1)
+        finally:
+            del hessobj._cheap_response
+    return fx_cheap
 
 def _gen_vind_keeping_nlc_ground_state(gen_vind):
     '''gen_vind whose fx keeps the NLC response's ground-state part (get_nlc_response_ground_state) for all its
@@ -4144,13 +4409,22 @@ def _gen_vind_keeping_nlc_ground_state(gen_vind):
 def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1, omega=None):
     mol = hessobj.mol
     mf = hessobj.base
-    grids = getattr(mf, 'cphf_grids', None)
-    if grids is not None:
-        logger.info(mf, 'Secondary grids defined for CPHF in Hessian')
+    # The cheap model of the two-level CPHF, where the solver asks for its
+    # response (_gen_vind_cheap): the XC and VV10 terms on its grids, and the
+    # seminumerical K
+    cheap = getattr(hessobj, '_cheap_response', None)
+    if cheap is None:
+        cheap = _CheapResponse()
+    if cheap.grids is not None:
+        grids = cheap.grids
     else:
-        # If cphf_grids is not defined, e.g object defined from CPU
-        grids = getattr(mf, 'grids', None)
-        logger.info(mf, 'Primary grids is used for CPHF in Hessian')
+        grids = getattr(mf, 'cphf_grids', None)
+        if grids is not None:
+            logger.info(mf, 'Secondary grids defined for CPHF in Hessian')
+        else:
+            # If cphf_grids is not defined, e.g object defined from CPU
+            grids = getattr(mf, 'grids', None)
+            logger.info(mf, 'Primary grids is used for CPHF in Hessian')
 
     if grids and grids.coords is None:
         grids.build(mol=mol, with_non0tab=False, sort_grids=True)
@@ -4172,12 +4446,19 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1, omega=None):
 
     if mf.do_nlc():
         # inside gen_vind's fx, the ground-state part kept for all CPHF cycles (built in the first)
-        ground_state = get_nlc_response_ground_state(mf, mol, mo_coeff, mo_occ,
+        mf_nlc = _nlc_response_scf(hessobj) if cheap.mf_nlc is None else cheap.mf_nlc
+        ground_state = get_nlc_response_ground_state(mf_nlc, mol, mo_coeff, mo_occ,
                                                      getattr(hessobj, '_nlc_ground_state', None))
-        vnlc = nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dms, ground_state=ground_state)
+        vnlc = nr_rks_fnlc_mo(mf_nlc, mol, mo_coeff, mo_occ, dms, ground_state=ground_state)
         v1 += vnlc.reshape(-1,nmo*nocc)
 
-    if hybrid:
+    if hybrid and cheap.with_sgx is not None:
+        # the cheap model's K, on its grid, for all the densities
+        vj = hessobj.get_jk_mo(mol, dms, mo_coeff, mo_occ, hermi=1, with_k=False)[0]
+        vk = cheap.with_sgx.get_k(dms, 1, omega, alpha, hyb)
+        vk = rhf_hess._ao2mo(vk, mocc, mo_coeff).reshape(-1,nmo*nocc)
+        v1 += vj - .5 * vk
+    elif hybrid:
         range_separated_mode = getattr(mf, 'range_separated_mode', 'mix_outside_kernel') # Direct SCF defaults to mix_outside_kernel
         if omega != 0:  # For range separated Coulomb
             if range_separated_mode == 'mix_outside_kernel':
@@ -4204,7 +4485,18 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1, omega=None):
 class Hessian(rhf_hess.HessianBase):
     '''Non-relativistic RKS hessian'''
 
-    _keys = {'grids', 'grid_response'}
+    _keys = {'grids', 'grid_response', 'nlc_fock_grid_response', 'cphf_nlcgrids_level'}
+
+    # The response of the grid in the VV10 term of the first-order Fock
+    # matrices (_get_vnlc_deriv1), which upstream always includes, also where
+    # grid_response is off for all other terms. False: without it.
+    nlc_fock_grid_response = True
+    # An approximation, off by default: the VV10 response of the CPHF
+    # equations on the NLC grids of this level in place of the SCF object's
+    # nlcgrids (as the XC response is on the SCF object's cphf_grids). The
+    # one response of the model that the two-level CPHF builds is then the
+    # cheap model's as well.
+    cphf_nlcgrids_level = None
 
     def __init__(self, mf):
         rhf_hess.Hessian.__init__(self, mf)
@@ -4212,9 +4504,10 @@ class Hessian(rhf_hess.HessianBase):
         self.grid_response = False
 
     partial_hess_elec = partial_hess_elec
-    hess_elec = rhf_hess.hess_elec
+    hess_elec = _hess_elec_sharing_nlc(rhf_hess.hess_elec)
     make_h1 = make_h1
     gen_vind = _gen_vind_keeping_nlc_ground_state(rhf_hess.gen_vind)
+    gen_vind_cheap = _gen_vind_cheap
     get_jk_mo = rhf_hess._get_jk_mo
     get_veff_resp_mo = get_veff_resp_mo
 

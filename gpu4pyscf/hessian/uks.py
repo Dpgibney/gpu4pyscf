@@ -26,7 +26,8 @@ from gpu4pyscf.hessian import uhf as uhf_hess
 from gpu4pyscf.hessian.rhf import _ao2mo
 from gpu4pyscf.hessian.rks import get_dweight_dA, get_d2weight_dAdB, get_d2mu_dr2, get_d3mu_dr3
 from gpu4pyscf.hessian.rks import (_get_enlc_deriv2, _get_vnlc_deriv1, nr_rks_fnlc_mo, get_nlc_response_ground_state,
-                                   _gen_vind_keeping_nlc_ground_state)
+                                   _gen_vind_keeping_nlc_ground_state, _gen_vind_cheap, _hess_elec_sharing_nlc,
+                                   _CheapResponse, _nlc_response_scf)
 from gpu4pyscf.hessian.rks import (MIN_BLK_SIZE, _block_ao_subset, _d1_dot_pair, _d1d2_dot_gemm,
                                    _add_d1d2_, _dR_rho1_sub_blocks, _dR_rho1_terms, _atom_sums,
                                    _contract_rho1_fxc_rows, _dR_rho1_atoms, _add_atom_rows_)
@@ -34,7 +35,7 @@ from gpu4pyscf.grad import rhf as rhf_grad
 from gpu4pyscf.grad import rks as rks_grad
 from gpu4pyscf.dft import numint
 from gpu4pyscf.dft.numint import _contract_rho1_fxc
-from gpu4pyscf.lib.cupy_helper import (contract, add_sparse, get_avail_mem, take_last2d)
+from gpu4pyscf.lib.cupy_helper import (contract, add_sparse, get_avail_mem, take_last2d, tag_array)
 from gpu4pyscf.lib import logger
 from gpu4pyscf.__config__ import min_grid_blksize
 
@@ -1847,13 +1848,21 @@ def _get_vxc_deriv1_grid_response(hessobj, mo_coeff, mo_occ, max_memory):
 def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1):
     mol = hessobj.mol
     mf = hessobj.base
-    grids = getattr(mf, 'cphf_grids', None)
-    if grids is not None:
-        logger.info(mf, 'Secondary grids defined for CPHF in Hessian')
+    # the cheap model of scf.two_level, where the CPHF solver asks for its
+    # response (see hessian.rks.get_veff_resp_mo)
+    cheap = getattr(hessobj, '_cheap_response', None)
+    if cheap is None:
+        cheap = _CheapResponse()
+    if cheap.grids is not None:
+        grids = cheap.grids
     else:
-        # If cphf_grids is not defined, e.g object defined from CPU
-        grids = getattr(mf, 'grids', None)
-        logger.info(mf, 'Primary grids is used for CPHF in Hessian')
+        grids = getattr(mf, 'cphf_grids', None)
+        if grids is not None:
+            logger.info(mf, 'Secondary grids defined for CPHF in Hessian')
+        else:
+            # If cphf_grids is not defined, e.g object defined from CPU
+            grids = getattr(mf, 'grids', None)
+            logger.info(mf, 'Primary grids is used for CPHF in Hessian')
 
     if grids and grids.coords is None:
         grids.build(mol=mol, with_non0tab=False, sort_grids=True)
@@ -1881,13 +1890,21 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1):
 
     if mf.do_nlc():
         # inside gen_vind's fx, the ground-state part kept for all CPHF cycles (built in the first)
-        ground_state = get_nlc_response_ground_state(mf, mol, mo_coeff, mo_occ,
+        mf_nlc = _nlc_response_scf(hessobj) if cheap.mf_nlc is None else cheap.mf_nlc
+        ground_state = get_nlc_response_ground_state(mf_nlc, mol, mo_coeff, mo_occ,
                                                      getattr(hessobj, '_nlc_ground_state', None))
-        vnlca, vnlcb = nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dms, ground_state=ground_state)
+        vnlca, vnlcb = nr_uks_fnlc_mo(mf_nlc, mol, mo_coeff, mo_occ, dms, ground_state=ground_state)
         v1vo[:,:nmoa*nocca] += vnlca.reshape(-1, nmoa*nocca)
         v1vo[:,nmoa*nocca:] += vnlcb.reshape(-1, nmob*noccb)
 
-    if hybrid:
+    if hybrid and cheap.with_sgx is not None:
+        # the cheap model's K, on its grid, for the densities of both spins
+        vj = hessobj.get_jk_mo(mol, dms, mo_coeff, mo_occ, hermi=1, with_k=False)[0]
+        vk = cheap.with_sgx.get_k(dms.reshape(-1,nao,nao), 1, omega, alpha, hyb).reshape(dms.shape)
+        v1vo += vj
+        v1vo[:,:nmoa*nocca] -= _ao2mo(vk[0], mocca, mo_coeff[0]).reshape(-1,nmoa*nocca)
+        v1vo[:,nmoa*nocca:] -= _ao2mo(vk[1], moccb, mo_coeff[1]).reshape(-1,nmob*noccb)
+    elif hybrid:
         range_separated_mode = getattr(mf, 'range_separated_mode', 'mix_outside_kernel') # Direct SCF defaults to mix_outside_kernel
         if omega != 0:  # For range separated Coulomb
             if range_separated_mode == 'mix_outside_kernel':
@@ -1928,21 +1945,30 @@ def nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo=True, ground_st
             As in nr_rks_fnlc_mo (built from both spins' orbitals)
     """
     assert mo_coeff.ndim == 3
-    return nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s[0]+dm1s[1], return_in_mo, ground_state)
+    dm1 = dm1s[0] + dm1s[1]
+    if hasattr(dm1s, 'mo1') and getattr(dm1s, 'symmetrize', 0) == 1:
+        # the first-order orbitals of the two spins that the densities are made of (hessian.uhf.gen_vind)
+        dm1 = tag_array(dm1, mo1=dm1s.mo1, symmetrize=1)
+    return nr_rks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1, return_in_mo, ground_state)
 
 class Hessian(rhf_hess.HessianBase):
     '''Non-relativistic UKS hessian'''
+
+    # see hessian.rks.Hessian
+    nlc_fock_grid_response = True
+    cphf_nlcgrids_level = None
 
     def __init__(self, mf):
         rhf_hess.Hessian.__init__(self, mf)
         self.grids = None
         self.grid_response = False
 
-    hess_elec = uhf_hess.hess_elec
+    hess_elec = _hess_elec_sharing_nlc(uhf_hess.hess_elec)
     solve_mo1 = uhf_hess.Hessian.solve_mo1
     partial_hess_elec = partial_hess_elec
     make_h1 = make_h1
     gen_vind = _gen_vind_keeping_nlc_ground_state(uhf_hess.gen_vind)
+    gen_vind_cheap = _gen_vind_cheap
     get_jk_mo = uhf_hess._get_jk_mo
     get_veff_resp_mo = get_veff_resp_mo
 
