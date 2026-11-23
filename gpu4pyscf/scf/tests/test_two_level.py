@@ -251,3 +251,79 @@ def test_two_level_fitted_j_models():
     assert two_level.cheap_scf(mf) is None
     mf.two_level_auxbasis = 'def2-universal-jfit'
     assert isinstance(two_level.cheap_scf(mf), two_level._FittedJ)
+
+# the parts a reference builds as a change of the density, and two_level_sgx_ref_level
+def test_two_level_reference_energy_form():
+    # The energy of V[D1] + V[dD] in the form that takes V[dD] at second order
+    from gpu4pyscf.lib.cupy_helper import tag_array
+    mol = _mol(0, 0)
+    mf = dft.RKS(mol, xc='b3lyp')
+    mf.kernel()
+    d2 = cp.asarray(mf.make_rdm1())
+    rng = np.random.default_rng(3)
+    x = cp.asarray(rng.normal(size=d2.shape)) * 1e-4
+    d1 = d2 + x + x.T
+    omega, alpha, hyb = mf._numint.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
+    def tr(a, b):
+        return float(cp.einsum('ij,ji', a, b))
+    k2 = mf.get_k(mol, d2, 1, omega, alpha, hyb)
+    dk = mf.get_k(mol, d2 - d1, 1, omega, alpha, hyb)
+    j2 = mf.get_j(mol, d2)
+    e_true = -.25 * tr(d2, k2)
+    zero = cp.zeros_like(d2)
+    vx = tag_array(zero, vj=zero, vk=zero, ecoul=0.)
+
+    # K with a k_change that is the exact K[dD] times 1 + eps: off by
+    # eps tr(dD K[dD]) / 4, where the plain form is by eps tr(D2 K[dD]) / 4
+    eps = 1e-2
+    def k_change(ddm, omega, alpha, hyb):
+        return mf.get_k(mol, ddm, 1, omega, alpha, hyb) * (1 + eps)
+    last = {}
+    v = two_level._own_jk(mf, mol, d1, vx, (False, True), last, k_change)
+    assert v.e_shift == 0
+    v = two_level._own_jk(mf, mol, d2, vx, (False, True), last, k_change)
+    e_plain = -.25 * tr(d2, 2 * v.vk)
+    second = -.25 * eps * tr(d2 - d1, dk)
+    assert abs(e_plain + v.e_shift - e_true - second) < 1e-11
+    assert abs(e_plain - e_true) > 100 * abs(second)
+    assert abs(v.vj + v.vk).max() == 0 and v.ecoul == 0
+
+    # the model's own K of the change
+    last = {}
+    for d in (d1, d2):
+        v = two_level._own_jk(mf, mol, d, vx, (False, True), last)
+    assert abs(2 * v.vk - k2).max() < 1e-10
+    assert abs(-.25 * tr(d2, 2 * v.vk) + v.e_shift - e_true) < 1e-11
+
+    # the model's own J: ecoul in the form, and e_shift what takes the trace
+    # of a hybrid's J - K/2 to it
+    last = {}
+    for d in (d1, d2):
+        v = two_level._own_jk(mf, mol, d, vx, (True, False), last)
+    assert abs(v.vj - j2).max() < 1e-10 and abs(v.vk).max() == 0
+    assert abs(v.ecoul - .5 * tr(d2, j2)) < 1e-10
+    assert abs(.5 * tr(d2, v.vj) + v.e_shift - v.ecoul) < 1e-10
+
+@pytest.mark.parametrize('case,dtype', [
+    ('rks_b3lyp', 'double'), ('rks_b3lyp', 'float'), ('rks_wb97mv_smd', 'double'),
+    ('uks_b3lyp', 'double'), ('uks_wb97mv', 'float')])
+def test_two_level_reference_k(case, dtype, monkeypatch):
+    from gpu4pyscf.scf import jk
+    e_plain = _plain_energy(case)
+    calls = []
+    get_k = jk.get_k
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return get_k(*args, **kwargs)
+    monkeypatch.setattr(jk, 'get_k', counted)
+    charge, spin, method = CASES[case]
+    mf = method(_mol(charge, spin))
+    mf.conv_tol = 1e-10
+    mf.two_level = True
+    mf.two_level_sgx_ref_level = 2
+    mf.two_level_sgx_ref_dtype = dtype
+    e = mf.kernel()
+    assert mf.converged
+    # one build of the four-center K, at the first of the references
+    assert mf.cycles >= 2 and len(calls) == 1
+    assert abs(e - e_plain) < 2e-9

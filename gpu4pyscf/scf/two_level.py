@@ -45,20 +45,27 @@ is fitted; J and K with two_level_sgx_level = None) is taken from the
 potential the cheap model has built for the reference density. What it
 approximates the model builds at each reference, as the change from its own
 J or K of the last reference; a reference then costs these and the XC and
-VV10 terms on the model's grids. The first reference is taken once the cheap
-model is converged to two_level_conv_tol (1e-5), and the DIIS history goes on
-across the references (the constant V[D_ref] - V_cheap[D_ref] is added to its
-Fock matrices, with their error vectors following), so that the iterations
-are those of the plain SCF. Where a reference builds J or K, the micro cycles
+VV10 terms on the model's grids. The energy of a part built as a change is
+put together so that the build of the change enters at second order
+(_own_jk): a build screened for a small change of the density leaves out
+more, traced with the whole density, than the build of the whole density
+does. With two_level_sgx_ref_level (off by default: an approximation) only
+the first reference builds the model's K, and the later ones take its change
+from the seminumerical K on that SGX grid, in the same form.
+
+The first reference is taken once the cheap model is converged to
+two_level_conv_tol (1e-5), and the DIIS history goes on across the
+references (the constant V[D_ref] - V_cheap[D_ref] is added to its Fock
+matrices, with their error vectors following), so that the iterations are
+those of the plain SCF. Where a reference builds J or K, the micro cycles
 go on until the energy left in their orbital gradient is below half of
 conv_tol (MICRO_LEFT): a reference that fails by a little costs another.
 
 Caffeine, wB97M-V with XC grid (99,590) and VV10 grid (50,194) in SMD water,
-on a GTX 1650 Super, the plain SCF, then the cheap model with the model's J
-and K, then with the seminumerical K: def2-SVP 130 s, 53 s, 42 s; def2-TZVP
-382 s, 273 s, 130 s (112 s with the fitted J too); def2-TZVPD 727 s, 584 s,
-246 s (192 s); the energy of the plain SCF to 2e-10 Eh, with its number of
-cycles and 2 references.
+on a GTX 1650 Super, the plain SCF and this one: def2-SVP 125 s and 37 s;
+def2-TZVP 367 s and 114 s (95 s with the fitted J too); def2-TZVPD 704 s
+and 223 s (169 s); the energy of the plain SCF to 2e-10 Eh, with its number
+of cycles and 2 references.
 
     >>> mf = dft.RKS(mol, xc='wb97m-v')
     >>> mf.two_level = True
@@ -322,11 +329,33 @@ def _cheap_parts(mf, cheap):
     return j_own, k_own
 
 
-def _own_jk(mf, mol, dm, vx, parts, last):
+def _trace(a, b):
+    '''tr(a b), summed over the spins of [2,nao,nao] arrays'''
+    return float(cupy.einsum('...ij,...ji->...', a, b).real.sum().get())
+
+
+def _own_jk(mf, mol, dm, vx, parts, last, k_change=None):
     '''J - K of the model for the reference density dm, as get_veff tags it
     (vj, vk, ecoul): the parts the cheap model approximates are built by mf,
-    as the change from those of the last reference density (last); the others
-    are those of the cheap potential vx. None if vx does not have them.'''
+    as the change from those of an earlier reference density (last); the
+    others are those of the cheap potential vx. None if vx does not have them.
+
+    A part built as a change, V[D] = V[D0] + V[dD] with the change dD of the
+    density since D0, has its energy put together as
+
+        tr(D V[D]) = tr(D0 V[D0]) + 2 tr(dD V[D0]) + tr(dD V[dD]),
+
+    where V[dD] enters at second order in dD (tr(D0 V[dD]) = tr(dD V[D0]) for
+    the integrals themselves; a V[dD] screened for dD is off by more in
+    tr(D0 V[dD]) than V[D0], built in one piece, is in tr(dD V[D0])). For K
+    this is the tag e_shift: what the form adds to the exchange energy of the
+    matrix K[D0] + K[dD] of the potential returned. For J it is the tag ecoul,
+    and with K in the potential (where get_veff traces J and K together) part
+    of e_shift as well.
+
+    With k_change, a function that gives a seminumerical K of a change of the
+    density, only the first reference builds the model's own K, and K of every
+    later reference is K[D1] + k_change(D - D1).'''
     j_own, k_own = parts
     hybrid = mf._numint.libxc.is_hybrid_xc(mf.xc)
     vk_x = getattr(vx, 'vk', None)
@@ -334,40 +363,59 @@ def _own_jk(mf, mol, dm, vx, parts, last):
         return None
     dm = asarray(dm)
     restricted = dm.ndim == 2
-    ddm = None if last.get('dm') is None else dm - last['dm']
+    dm_tot = dm if restricted else dm[0] + dm[1]
     ecoul = None
+    e_shift = 0
     if j_own:
-        if ddm is None:
-            vj = mf.get_j(mol, dm if restricted else dm[0] + dm[1], 1)
+        if last.get('vj') is None:
+            vj = mf.get_j(mol, dm_tot, 1)
+            tj = _trace(dm_tot, vj)
         else:
-            vj = mf.get_j(mol, ddm if restricted else ddm[0] + ddm[1], 1)
-            vj += last['vj']
-        last['vj'] = vj
+            ddm = dm_tot - last['jdm']
+            dj = mf.get_j(mol, ddm, 1)
+            tj = last['tj'] + 2 * _trace(ddm, last['vj']) + _trace(ddm, dj)
+            vj = last['vj'] + dj
+            dj = None
+            if hybrid:
+                # get_veff traces J and K of a hybrid together, tr(D (J - K/2))
+                e_shift = (tj - _trace(dm_tot, vj)) * .5
+        last.update(vj=vj, jdm=dm_tot, tj=tj)
+        ecoul = tj * .5
     else:
         vj = asarray(vx.vj)
         if hybrid:
             vj = vj + asarray(vk_x)
         ecoul = getattr(vx, 'ecoul', None)
-    if ecoul is None:
-        ecoul = float(cupy.einsum('ij,ji->', dm if restricted else dm[0] + dm[1],
-                                  vj if vj.ndim == 2 else vj[0]).real.get()) * .5
+        if ecoul is None:
+            ecoul = _trace(dm_tot, vj if vj.ndim == 2 else vj[0]) * .5
     kpart = None
     vhf = vj
     if hybrid:
         if k_own:
             omega, alpha, hyb = mf._numint.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
-            if ddm is None:
+            if last.get('vk') is None:
                 vk = mf.get_k(mol, dm, 1, omega, alpha, hyb)
+                last.update(vk=vk, kdm=dm, tk=_trace(dm, vk))
             else:
-                vk = mf.get_k(mol, ddm, 1, omega, alpha, hyb)
-                vk += last['vk']
-            last['vk'] = vk
+                ddm = dm - last['kdm']
+                if k_change is None:
+                    dk = mf.get_k(mol, ddm, 1, omega, alpha, hyb)
+                else:
+                    dk = k_change(ddm, omega, alpha, hyb)
+                tk = last['tk'] + 2 * _trace(ddm, last['vk']) + _trace(ddm, dk)
+                vk = last['vk'] + dk
+                dk = None
+                # E_x = -1/4 tr(D K) for restricted, -1/2 sum over the spins otherwise
+                e_shift -= (.25 if restricted else .5) * (tk - _trace(dm, vk))
+                if k_change is None:
+                    # the next change is taken from this density; with k_change
+                    # from the first reference's, whose K is the model's own
+                    last.update(vk=vk, kdm=dm, tk=tk)
             kpart = vk * .5 if restricted else vk
         else:
             kpart = asarray(vk_x)
         vhf = vj - kpart
-    last['dm'] = dm
-    return tag_array(vhf, vj=vhf, vk=kpart, ecoul=ecoul)
+    return tag_array(vhf, vj=vhf, vk=kpart, ecoul=ecoul, e_shift=e_shift)
 
 
 def _shares_jk(mf, cheap):
@@ -382,23 +430,53 @@ def _shares_jk(mf, cheap):
             and cheap.direct_scf_tol == mf.direct_scf_tol)
 
 
-def _veff_at_reference(mf, cheap, mol, dm, vx, last):
+def _veff_at_reference(mf, cheap, mol, dm, vx, last, k_change=None):
     '''The model's potential of the reference density dm, where the cheap
     model's potential is vx. Where the two share J and K, get_veff's
     incremental build with no change of the density takes them from vx and
     evaluates the XC terms on the model's grids only. Where the cheap model
     fits J or evaluates K seminumerically, the model builds that part, as the
     change from its part of the last reference (last), and the other is taken
-    from vx.'''
+    from vx; k_change as in _own_jk.'''
     if getattr(vx, 'vj', None) is not None:
         if _shares_jk(mf, cheap):
             return mf.get_veff(mol, dm, dm_last=dm, vhf_last=vx)
         parts = _cheap_parts(mf, cheap)
         if parts is not None:
-            vlast = _own_jk(mf, mol, dm, vx, parts, last)
+            vlast = _own_jk(mf, mol, dm, vx, parts, last, k_change)
             if vlast is not None:
-                return mf.get_veff(mol, dm, dm_last=dm, vhf_last=vlast)
+                vref = mf.get_veff(mol, dm, dm_last=dm, vhf_last=vlast)
+                if vlast.e_shift:
+                    vref = tag_array(vref, exc=vref.exc + vlast.e_shift)
+                return vref
     return mf.get_veff(mol, dm)
+
+
+def _reference_k_change(mf, cheap, mol):
+    '''The function k_change of _own_jk for the model mf: the seminumerical K
+    on the SGX grid of level two_level_sgx_ref_level, in the precision
+    two_level_sgx_ref_dtype; None where every reference is to build the
+    model's own K.'''
+    level = mf.two_level_sgx_ref_level
+    dtype = mf.two_level_sgx_ref_dtype
+    parts = _cheap_parts(mf, cheap)
+    if level is None or parts is None or not parts[1]:
+        return None
+    from gpu4pyscf.sgx import sgx
+    made = []
+
+    def k_change(ddm, omega, alpha, hyb):
+        if not made:
+            with_sgx = cheap.with_sgx
+            if with_sgx.grids_level != level or with_sgx.kernel_dtype != dtype:
+                with_sgx = sgx.SGX(mol)
+                with_sgx.grids_level = level
+                with_sgx.kernel_dtype = dtype
+                with_sgx.verbose = mf.verbose
+                with_sgx.stdout = mf.stdout
+            made.append(with_sgx)
+        return made[0].get_k(ddm, 1, omega, alpha, hyb)
+    return k_change
 
 
 def _tagged(v, like):
@@ -510,11 +588,13 @@ def kernel(mf, conv_tol=1e-10, conv_tol_grad=None, dump_chk=True, dm0=None,
     kref = {}
     # a reference builds J or K, not only the XC terms
     costly_reference = SECOND_ORDER_TEST and _cheap_parts(mf, cheap) is not None
+    # after the first reference, the change of K from a seminumerical K
+    k_change = _reference_k_change(mf, cheap, mol)
     dv = 0
     mf.cycles = 0
     for cycle in range(mf.max_cycle):
         # a reference: the potential, energy and orbital gradient of mf itself
-        vhf = vref = _veff_at_reference(mf, cheap, mol, with_orbitals(dm), vx, kref)
+        vhf = vref = _veff_at_reference(mf, cheap, mol, with_orbitals(dm), vx, kref, k_change)
         e_tot = mf.energy_tot(dm, h1e, vref)
         fock = mf.get_fock(h1e, s1e, vref, dm)  # = h1e + vref, no DIIS
         norm_gorb = gnorm(fock)

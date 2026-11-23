@@ -1026,6 +1026,16 @@ class SCF(pyscf_lib.StreamObject):
     # then builds its own K. None: the copy builds the model's K in every cycle.
     two_level_sgx_level      = getattr(__config__, 'scf_hf_SCF_two_level_sgx_level', 1)
     two_level_sgx_dtype      = getattr(__config__, 'scf_hf_SCF_two_level_sgx_dtype', 'float')
+    # The model's own K at the references after the first: None for the
+    # four-center integrals at every reference; an SGX level to take the change
+    # of K since the first reference from the seminumerical K on that grid, in
+    # two_level_sgx_ref_dtype, with the energy in a form where this change
+    # enters at second order. An approximation, off by default. Measured for
+    # caffeine, wB97M-V in SMD water, in double precision: def2-TZVP 1e-12 Eh on
+    # level 2 and 2e-13 Eh on level 3, def2-TZVPD 3e-11 and 2e-12 Eh; in single
+    # precision 2e-12 Eh in def2-TZVP, 2e-10 Eh in def2-TZVPD on either level.
+    two_level_sgx_ref_level  = getattr(__config__, 'scf_hf_SCF_two_level_sgx_ref_level', None)
+    two_level_sgx_ref_dtype  = getattr(__config__, 'scf_hf_SCF_two_level_sgx_ref_dtype', 'double')
     # The J of that copy, where the model's J is the exact one: an auxiliary basis
     # for a fitted J without a stored tensor ('aug_etb' for PySCF's even-tempered
     # basis of the molecule: the fit has to be that good, def2-universal-jfit
@@ -1042,7 +1052,8 @@ class SCF(pyscf_lib.StreamObject):
         'direct_scf', 'direct_scf_tol', 'jk_one_pass', 'conv_check', 'callback',
         'two_level', 'two_level_scf', 'two_level_grids_level', 'two_level_nlcgrids_level',
         'two_level_conv_tol', 'two_level_micro_cycles', 'two_level_sgx_level',
-        'two_level_sgx_dtype', 'two_level_auxbasis',
+        'two_level_sgx_dtype', 'two_level_auxbasis', 'two_level_sgx_ref_level',
+        'two_level_sgx_ref_dtype',
         'mol', 'chkfile', 'mo_energy', 'mo_coeff', 'mo_occ',
         'e_tot', 'converged', 'cycles', 'scf_summary',
         'disp', 'disp_with_3body',
@@ -1159,6 +1170,8 @@ class SCF(pyscf_lib.StreamObject):
                      self.two_level_sgx_level, self.two_level_sgx_dtype,
                      self.two_level_auxbasis if isinstance(self.two_level_auxbasis, (str, type(None)))
                      else 'a basis')
+            log.info('two_level_sgx_ref_level = %s  two_level_sgx_ref_dtype = %s',
+                     self.two_level_sgx_ref_level, self.two_level_sgx_ref_dtype)
         if self.chkfile:
             log.info('chkfile to save SCF result = %s', self.chkfile)
         return self
