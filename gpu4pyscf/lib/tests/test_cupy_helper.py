@@ -316,6 +316,61 @@ class KnownValues(unittest.TestCase):
             cusolver.MAX_EIGH_DIM = bakup
         assert abs(eref - e).max() < 1e-12
 
+    def test_conditional_mempool_malloc(self):
+        # A large allocation that the device refuses while the memory pool
+        # holds memory in free blocks: the blocks are returned to the device
+        # and the allocation is made again
+        mempool = cupy.get_default_memory_pool()
+        runtime = cupy.cuda.runtime
+        cuda_malloc = cupy.cuda.memory._malloc
+        threshold = cupy_helper.MEMPOOL_THRESHOLD
+        refused = []
+        def refusing_once(size):
+            if not refused:
+                refused.append(size)
+                raise runtime.CUDARuntimeError(2)   # cudaErrorMemoryAllocation
+            return cuda_malloc(size)
+        def refusing(size):
+            refused.append(size)
+            raise runtime.CUDARuntimeError(2)   # cudaErrorMemoryAllocation
+        try:
+            cupy.cuda.memory._malloc = refusing_once
+            cupy_helper.set_conditional_mempool_malloc()
+            mempool.free_all_blocks()
+            a = cupy.zeros(threshold * 5 // 8 // 8)     # from the pool
+            nbytes = a.nbytes
+            del a
+            held = mempool.free_bytes()
+            assert held >= nbytes
+            assert not refused
+            b = cupy.zeros(threshold // 8 + 16)         # from the device
+            assert refused == [b.nbytes]
+            assert mempool.free_bytes() <= held - nbytes
+            assert float(b.sum()) == 0
+            del b
+
+            # a device that has no such chunk
+            cupy.cuda.memory._malloc = refusing
+            cupy_helper.set_conditional_mempool_malloc()
+            del refused[:]
+            with self.assertRaises(cupy.cuda.memory.OutOfMemoryError):
+                cupy.empty(threshold // 8 + 16)
+            assert len(refused) == 3
+            # and the allocations of the pool do not go there
+            a = cupy.zeros(1000)
+            assert len(refused) == 3
+
+            # other errors are passed on
+            def failing(size):
+                raise runtime.CUDARuntimeError(1)   # cudaErrorInvalidValue
+            cupy.cuda.memory._malloc = failing
+            cupy_helper.set_conditional_mempool_malloc()
+            with self.assertRaises(runtime.CUDARuntimeError):
+                cupy.empty(threshold // 8 + 16)
+        finally:
+            cupy.cuda.memory._malloc = cuda_malloc
+            cupy_helper.set_conditional_mempool_malloc()
+
 if __name__ == "__main__":
     print("Full tests for cupy helper module")
     unittest.main()
