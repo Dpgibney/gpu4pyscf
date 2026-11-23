@@ -105,9 +105,13 @@ class WithSolventHess:
         return out
 
     def kernel(self, *args, dm=None, atmlst=None, **kwargs):
-        with lib.temporary_env(self.base.with_solvent, equilibrium_solvation=True):
-            logger.debug(self, 'Compute hessian from solutes')
-            self.de_solute = super().kernel(*args, **kwargs)
+        try:
+            with lib.temporary_env(self.base.with_solvent, equilibrium_solvation=True):
+                logger.debug(self, 'Compute hessian from solutes')
+                self.de_solute = super().kernel(*args, **kwargs)
+        finally:
+            # the integrals with the orbital products (pcm_hess._mo_integrals_of)
+            self._solvent_mo_integrals = None
 
         if dm is None:
             dm = self.base.make_rdm1()

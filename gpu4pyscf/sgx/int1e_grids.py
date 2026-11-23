@@ -19,6 +19,14 @@ a density matrix or with the charges, without the integrals being stored:
     v[g] = sum_{mu nu} D[mu,nu] (mu nu|g)        (Int1eGridsOpt.density_contracted)
     V[mu,nu] = sum_g c[g] (mu nu|g)              (Int1eGridsOpt.charge_contracted)
 
+and the integrals of each point between two sets of orbitals,
+
+    T[g,p,i] = sum_{mu nu} C[mu,p] (mu nu|g) C'[nu,i]     (Int1eGridsOpt.orbital_contracted)
+
+from which the two contractions of any number of densities C x C'^T + c.c.
+and of sets of charges are matrix products (the response of a continuum
+solvent in the CPHF equations),
+
 for point charges, or for normalized Gaussian charges of an exponent per
 point (the surface charges of a continuum solvent). These are the contractions
 of gpu4pyscf.gto.int3c1e.int1e_grids with dm and with charges, on the kernels
@@ -41,6 +49,33 @@ from gpu4pyscf.sgx import kernels, sgx_jk
 from gpu4pyscf.sgx.kernels import cart_tuples
 
 __all__ = ['Int1eGridsOpt', 'density_contracted', 'charge_contracted']
+
+# The horizontal recurrence of the integrals of the shell pairs of a class on
+# a batch of points, m[g,pair,e] = [e|0]_g, into the matrices of the points:
+# dense[g, index[pair,ab]] = sum_e w[pair,ab,e] m[g,pair,e]
+_HRR_SCATTER = cp.RawKernel(r'''
+extern "C" __global__
+void sgx_hrr_scatter(double* __restrict__ dense, const double* __restrict__ m,
+        const double* __restrict__ w, const long long* __restrict__ index,
+        const int ng, const int npairs, const int nab, const int ne, const long long n2)
+{
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long long)ng * npairs * nab) {
+        return;
+    }
+    const int ab = (int)(t % nab);
+    const long long gp = t / nab;
+    const int ip = (int)(gp % npairs);
+    const long long g = gp / npairs;
+    const double* __restrict__ mm = m + (g * npairs + ip) * ne;
+    const double* __restrict__ ww = w + ((long long)ip * nab + ab) * ne;
+    double acc = 0;
+    for (int e = 0; e < ne; ++e) {
+        acc += ww[e] * mm[e];
+    }
+    dense[g * n2 + index[(long long)ip * nab + ab]] = acc;
+}
+''', 'sgx_hrr_scatter')
 
 # threads of a block: grid points for the potential, primitive pairs for the moments
 BLKSIZE = 128
@@ -93,7 +128,7 @@ class Int1eGridsOpt:
             cols = pc.pairs[:,1].astype(np.int64)[:,None,None] + np.arange(nj)[None,None,:]
             self.classes.append(dict(
                 li=li, lj=lj, npairs=pc.npairs, nprims=len(pc.prims),
-                prims=pc.prims,
+                prims=pc.prims, pairs=pc.pairs,
                 prim_pair=cp.asarray(np.repeat(np.arange(pc.npairs, dtype=np.int32), nprim)),
                 # the elements of the pairs' blocks in the [nao,nao] matrix of the sorted mol
                 index=cp.asarray((rows * nao + cols).reshape(pc.npairs, ni * nj)),
@@ -195,6 +230,74 @@ class Int1eGridsOpt:
         out = smol.apply_CT_mat_C(out + out.T)
         # symmetric to the last bit, as the blocks it was made of
         return (out + out.T) * .5
+
+
+    def orbital_contracted(self, mo_left, mo_right, coords, exponents=None, out=None,
+                           max_memory=None):
+        '''T[g,p,i] = sum_{mu nu} mo_left[mu,p] (mu nu|g) mo_right[nu,i] for the
+        points coords [n,3], with point charges, or normalized Gaussian
+        charges of the given exponents [n]: [n, columns of mo_left, columns of
+        mo_right].
+
+        The integrals of a batch of points are made as matrices and
+        transformed; max_memory (bytes, a fifth of the free device memory by
+        default) bounds the batch. out may be a NumPy array: the batches are
+        then moved off the device as they are made.'''
+        from gpu4pyscf.lib.cupy_helper import get_avail_mem
+        smol = self.sorted_mol
+        ngrids, grid, gexp, gauss = self._grid(coords, exponents, np.float64)
+        nao = self.nao_cart
+        cl = cp.ascontiguousarray(smol.apply_C_dot(cp.asarray(mo_left, dtype=np.float64)))
+        cr = cp.ascontiguousarray(smol.apply_C_dot(cp.asarray(mo_right, dtype=np.float64)))
+        nl, nr = cl.shape[1], cr.shape[1]
+        if out is None:
+            out = cp.empty((ngrids, nl, nr))
+        assert out.shape == (ngrids, nl, nr)
+        if max_memory is None:
+            max_memory = get_avail_mem() * .2
+        # of a point: the matrix and its transpose, the two transformed ones
+        per_point = (2 * nao * nao + nao * nr + nl * nr) * 8
+        step = max(1, min(ngrids, 1024, int(max_memory / per_point)))
+        for g0 in range(0, ngrids, step):
+            g1 = min(g0 + step, ngrids)
+            ng = g1 - g0
+            dense = cp.zeros((ng, nao * nao))
+            for n, c in enumerate(self.classes):
+                L = c['li'] + c['lj']
+                npairs = c['npairs']
+                nab, ne = c['w'].shape[1:]
+                kern = kernels.get_grid_kernel('p', c['li'], c['lj'], gauss, 'double')
+                boys = kernels.boys_table(L, 'double', kernels.GRID_BOYS_ORDER['double'],
+                                          kernels.grid_boys_tmax(L, 'double'))
+                prims = self._device_prims(n, 'double')
+                if 'pairs_dev' not in c:
+                    c['pairs_dev'] = cp.asarray(c['pairs'], dtype=np.int32)
+                m = cp.empty((ng, npairs, ne))
+                nblk = (npairs + BLKSIZE - 1) // BLKSIZE
+                # points per launch, by their work
+                sub = max(1, int(sgx_jk._LAUNCH_WORK / (c['nprims'] * sgx_jk._class_cost(L))))
+                for h0 in range(0, ng, sub):
+                    h1 = min(h0 + sub, ng)
+                    kern((nblk, h1 - h0), (BLKSIZE,),
+                         (m[h0:h1], grid, gexp, c['pairs_dev'], prims, boys,
+                          np.int32(npairs), np.int32(g0 + h0), np.int32(ngrids)))
+                total = ng * npairs * nab
+                _HRR_SCATTER(((total + 255) // 256,), (256,),
+                             (dense, m, c['w'], c['index'], np.int32(ng), np.int32(npairs),
+                              np.int32(nab), np.int32(ne), np.int64(nao * nao)))
+                m = None
+            dense = dense.reshape(ng, nao, nao)
+            # both triangles from the pairs i >= j (the diagonal pairs count half)
+            dense = dense + dense.transpose(0, 2, 1)
+            t = cp.matmul(dense, cr)
+            dense = None
+            t = cp.tensordot(t, cl, axes=(1, 0)).transpose(0, 2, 1)
+            if isinstance(out, cp.ndarray):
+                out[g0:g1] = t
+            else:
+                out[g0:g1] = t.get()
+            t = None
+        return out
 
 
 def density_contracted(mol, coords, dm, exponents=None, opt=None, dtype='double'):

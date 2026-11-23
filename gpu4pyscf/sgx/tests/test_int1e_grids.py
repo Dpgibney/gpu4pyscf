@@ -61,6 +61,45 @@ def test_contractions(basis, ngrids, gauss):
         assert abs(m - m_ref).max() < tol * abs(m_ref).max()
         assert abs(m - m.T).max() == 0
 
+@pytest.mark.parametrize('basis,ngrids', [('def2-tzvp', 300), ('def2-qzvp', 150)])
+@pytest.mark.parametrize('gauss', [False, True])
+def test_orbital_contracted(basis, ngrids, gauss):
+    # the integrals of each point between two sets of orbitals, against
+    # libcint; in batches of points, and into a NumPy array
+    mol, coords, dm, charges, expnt = _case(basis, ngrids)
+    if gauss:
+        a = df.incore.aux_e2(mol, gto.fakemol_for_charges(coords, expnt=expnt), intor='int3c2e')
+        ex = cp.asarray(expnt)
+    else:
+        a = mol.intor('int1e_grids', grids=coords).transpose(1, 2, 0)
+        ex = None
+    rng = np.random.default_rng(3)
+    left = rng.normal(size=(mol.nao, 7))
+    right = rng.normal(size=(mol.nao, 4))
+    ref = np.einsum('mp,mng,ni->gpi', left, a, right)
+    opt = int1e_grids.Int1eGridsOpt(mol)
+    t = opt.orbital_contracted(cp.asarray(left), cp.asarray(right), coords, ex)
+    assert t.shape == ref.shape
+    assert abs(t.get() - ref).max() < 1e-13 * abs(ref).max()
+    # a few points at a time
+    nao_cart = opt.nao_cart
+    t1 = opt.orbital_contracted(left, right, coords, ex, max_memory=nao_cart**2 * 8 * 2.5 * 7)
+    assert abs(t1 - t).max() < 1e-13 * abs(ref).max()
+    out = np.empty(ref.shape)
+    t2 = opt.orbital_contracted(left, right, coords, ex, out=out)
+    assert t2 is out
+    assert abs(out - ref).max() < 1e-13 * abs(ref).max()
+    # the two contractions as products with it
+    c = cp.asarray(np.linalg.qr(rng.normal(size=(mol.nao, mol.nao)))[0])
+    full = opt.orbital_contracted(c, c, coords, ex)
+    dmo = c.T.dot(cp.asarray(dm)).dot(c)
+    v = cp.einsum('gpq,pq->g', full, dmo)
+    v_ref = opt.density_contracted(cp.asarray(dm), coords, ex)
+    assert abs(v - v_ref).max() < 1e-12 * abs(v_ref).max()
+    m = cp.einsum('g,gpq->pq', cp.asarray(charges), full)
+    m_ref = c.T.dot(opt.charge_contracted(cp.asarray(charges), coords, ex)).dot(c)
+    assert abs(m - m_ref).max() < 1e-12 * abs(m_ref).max()
+
 def test_against_int3c1e():
     # what they stand in for, with several densities and sets of charges
     mol, coords, dm, charges, expnt = _case('def2-tzvp', 200)

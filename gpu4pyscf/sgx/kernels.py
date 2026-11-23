@@ -564,16 +564,76 @@ void %(name)s(REAL* __restrict__ M, const REAL* __restrict__ grid, const REAL* _
            boys=ind(boys, 8), vrr=ind(vrr, 8), acc=ind(acc, 8), store=ind(store, 4))
 
 
+def pair_kernel_source(li, lj, gauss=False, dtype='double'):
+    '''The CUDA source of the kernel that sets, for the shell pairs (li, lj)
+    and the grid points g0 .. g0 + gridDim.y - 1, M[g,pair,e] to [e|0]_g
+    summed over the primitive pairs of the shell pair: the integrals of each
+    of a batch of points themselves, before the horizontal recurrence.
+
+    A thread takes a shell pair and a grid point: M is [gridDim.y, npairs,
+    number of powers e]. pairs holds, as its third and fourth entries of a
+    shell pair, the range of its primitive pairs.
+    '''
+    assert li >= lj
+    L = li + lj
+    vrr, targets, names = _gen_vrr(L, li, accumulate=False)
+    ne = len(targets)
+    boys = _grid_boys(L, gauss, dtype, 'q[4]')
+    geom = ['const REAL pax = q[5], pay = q[6], paz = q[7];'] if L > 0 else []
+    zero = ['REAL %s;' % ', '.join('E%d = 0' % n for n in range(ne))]
+    acc = ['E%d += %s;' % (n, name) for n, name in enumerate(names)]
+    store = ['m[%d] = E%d;' % (n, n) for n in range(ne)]
+    point = ['const REAL zeta = gexp[g], omega = gexp[(size_t)ld + g];'] if gauss else []
+
+    def ind(lines, n):
+        return '\n'.join(' ' * n + x for x in lines)
+
+    return '''
+extern "C" __global__
+void %(name)s(REAL* __restrict__ M, const REAL* __restrict__ grid, const REAL* __restrict__ gexp,
+        const int* __restrict__ pairs, const REAL* __restrict__ prims,
+        const REAL* __restrict__ boys,
+        const int npairs, const int g0, const int ld)
+{
+    const int ip = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ip >= npairs) {
+        return;
+    }
+    const int g = g0 + blockIdx.y;
+    const int k0 = pairs[4*ip+2], k1 = pairs[4*ip+3];
+    const REAL gx = grid[g], gy = grid[(size_t)ld + g], gz = grid[(size_t)2*ld + g];
+%(point)s
+%(zero)s
+    for (int k = k0; k < k1; ++k) {
+        const REAL* __restrict__ q = prims + %(nrec)d * (size_t)k;
+        const REAL p = q[0];
+        const REAL cpx = gx - q[1], cpy = gy - q[2], cpz = gz - q[3];
+        const REAL T = p * (cpx*cpx + cpy*cpy + cpz*cpz);
+%(boys)s
+%(geom)s
+%(vrr)s
+%(acc)s
+    }
+    REAL* __restrict__ m = M + ((size_t)blockIdx.y * npairs + ip) * %(ne)d;
+%(store)s
+}
+''' % dict(name=grid_kernel_name('p', li, lj, gauss, dtype), nrec=NREC, ne=ne,
+           point=ind(point, 4), zero=ind(zero, 4), boys=ind(boys, 8), geom=ind(geom, 8),
+           vrr=ind(vrr, 8), acc=ind(acc, 8), store=ind(store, 4))
+
+
 _kernels = {}
 def get_grid_kernel(kind, li, lj, gauss=False, dtype='double'):
     '''The compiled kernel of a J-type contraction: kind 'v' for the potential
     of a density (potential_kernel_source), 'm' for the moments of charges
-    (moment_kernel_source)'''
+    (moment_kernel_source), 'p' for the integrals of the shell pairs on each
+    point (pair_kernel_source)'''
     key = (kind, li, lj, gauss, dtype)
     if key not in _kernels:
         if max(li, lj) > LMAX:
             raise NotImplementedError('angular momentum %d' % max(li, lj))
-        source = {'v': potential_kernel_source, 'm': moment_kernel_source}[kind]
+        source = {'v': potential_kernel_source, 'm': moment_kernel_source,
+                  'p': pair_kernel_source}[kind]
         code = '#define REAL %s\n' % dtype + source(li, lj, gauss, dtype)
         _kernels[key] = cp.RawKernel(code, grid_kernel_name(kind, li, lj, gauss, dtype),
                                      options=('-std=c++17',))
