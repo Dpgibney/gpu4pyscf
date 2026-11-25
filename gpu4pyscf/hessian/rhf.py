@@ -1039,6 +1039,68 @@ def _get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1, omega=None):
                      hermi=hermi, with_j=True, with_k=True, omega=omega)
     return vj - 0.5 * vk
 
+def _sgx_response_k(hessobj):
+    '''The SGX object of the CPHF response under hessobj.sgx_response, made at
+    the first call and kept on hessobj; None without sgx_response'''
+    if not getattr(hessobj, 'sgx_response', False):
+        return None
+    mol = hessobj.mol
+    key = (mol, hessobj.sgx_response_level, hessobj.sgx_response_dtype)
+    kept = hessobj.__dict__.get('_sgx_response_k')
+    if kept is None or kept[0] != key:
+        from gpu4pyscf.sgx import sgx
+        with_sgx = sgx.SGX(mol)
+        with_sgx.grids_level = hessobj.sgx_response_level
+        with_sgx.kernel_dtype = hessobj.sgx_response_dtype
+        with_sgx.verbose = hessobj.verbose
+        with_sgx.stdout = hessobj.stdout
+        with_sgx.build()
+        logger.info(hessobj, 'CPHF response with %s and SGX K on grid level %d, %d points, %s kernels',
+                    'the exact J' if hessobj.sgx_response_auxbasis is None else
+                    'RI-J (%s)' % hessobj.sgx_response_auxbasis,
+                    with_sgx.grids_level, with_sgx.size, with_sgx.kernel_dtype)
+        kept = hessobj._sgx_response_k = (key, with_sgx)
+    return kept[1]
+
+def _response_j_mo(hessobj, mol, dms, mo_coeff, mo_occ):
+    '''The J of the response densities dms in the MO form of hessobj.get_jk_mo:
+    RI-J in sgx_response_auxbasis under sgx_response, else get_jk_mo's own.
+    Unrestricted orbitals: dms [2,nset,nao,nao] (or [2*nset,nao,nao]), J of
+    the summed spin densities in the blocks of the two spins.'''
+    auxbasis = None
+    if getattr(hessobj, 'sgx_response', False):
+        auxbasis = hessobj.sgx_response_auxbasis
+    if auxbasis is None:
+        return hessobj.get_jk_mo(mol, dms, mo_coeff, mo_occ, hermi=1, with_k=False)[0]
+    from gpu4pyscf.df import df, df_jk
+    key = (mol, str(auxbasis))
+    kept = hessobj.__dict__.get('_sgx_response_dfj')
+    if kept is None or kept[0] != key:
+        aux = auxbasis
+        if isinstance(aux, str) and aux.lower().replace('-', '_') == 'aug_etb':
+            from pyscf.df import aug_etb
+            aux = aug_etb(mol)
+        dfj = df.DF(mol, auxbasis=aux)
+        dfj.verbose = hessobj.verbose
+        dfj.stdout = hessobj.stdout
+        kept = hessobj._sgx_response_dfj = (key, dfj)
+    dfj = kept[1]
+    mo_coeff = cupy.asarray(mo_coeff)
+    mo_occ = cupy.asarray(mo_occ)
+    nao = dms.shape[-1]
+    dms = cupy.asarray(dms).reshape(-1, nao, nao)
+    if mo_coeff.ndim == 2:
+        vj = df_jk.get_j(dfj, dms, hermi=1)
+        mocc = mo_coeff[:,mo_occ>0.5]
+        return _ao2mo(vj, mocc, mo_coeff).reshape(len(dms), -1)
+    n2 = len(dms) // 2
+    vj = df_jk.get_j(dfj, dms[:n2] + dms[n2:], hermi=1)
+    out = []
+    for s in range(2):
+        mocc = mo_coeff[s][:,mo_occ[s]>0.5]
+        out.append(_ao2mo(vj, mocc, mo_coeff[s]).reshape(n2, -1))
+    return cupy.hstack(out)
+
 class HessianBase(lib.StreamObject):
 
     to_cpu = utils.to_cpu
@@ -1074,9 +1136,20 @@ class HessianBase(lib.StreamObject):
     cphf_two_level_parts = getattr(__config__, 'hessian_rhf_cphf_two_level_parts', ('nlc',))
     cphf_two_level_grids_level = getattr(__config__, 'hessian_rhf_cphf_two_level_grids_level', 0)
     cphf_two_level_nlcgrids_level = getattr(__config__, 'hessian_rhf_cphf_two_level_nlcgrids_level', 0)
+    # An approximation, off by default (the CPU tree's sgx_response): the J and
+    # K of the CPHF response, only those, from RI-J in sgx_response_auxbasis
+    # (None: the exact J) and the seminumerical K of gpu4pyscf.sgx on its grid
+    # of level sgx_response_level, its kernels in sgx_response_dtype. The SCF,
+    # the derivative integrals and the XC and VV10 responses stay exact. RKS
+    # and UKS. 'aug_etb' is the even-tempered basis of pyscf.df.aug_etb(mol).
+    sgx_response = getattr(__config__, 'hessian_rhf_sgx_response', False)
+    sgx_response_level = getattr(__config__, 'hessian_rhf_sgx_response_level', 1)
+    sgx_response_dtype = getattr(__config__, 'hessian_rhf_sgx_response_dtype', 'float')
+    sgx_response_auxbasis = getattr(__config__, 'hessian_rhf_sgx_response_auxbasis', None)
     _keys       = rhf_hess_cpu.HessianBase._keys | {
         'cphf_residual_tol', 'cphf_two_level', 'cphf_two_level_parts',
-        'cphf_two_level_grids_level', 'cphf_two_level_nlcgrids_level'}
+        'cphf_two_level_grids_level', 'cphf_two_level_nlcgrids_level',
+        'sgx_response', 'sgx_response_level', 'sgx_response_dtype', 'sgx_response_auxbasis'}
 
     # methods
     hess_elec       = rhf_hess_cpu.HessianBase.hess_elec
@@ -1091,6 +1164,9 @@ class HessianBase(lib.StreamObject):
 
     def solve_mo1(self, mo_energy, mo_coeff, mo_occ, h1mo,
                   fx=None, atmlst=None, max_memory=4000, verbose=None):
+        from gpu4pyscf.dft import rks
+        if self.sgx_response and not isinstance(self.base, rks.KohnShamDFT):
+            raise NotImplementedError('sgx_response of Hartree-Fock Hessians')
         # The J and K of direct SCF skip more for the smaller trial vectors of
         # the later cycles; density fitting has no such screening to gain from.
         scale_trials = getattr(self.base, 'with_df', None) is None

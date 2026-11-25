@@ -4471,10 +4471,15 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1, omega=None):
         vnlc = nr_rks_fnlc_mo(mf_nlc, mol, mo_coeff, mo_occ, dms, ground_state=ground_state)
         v1 += vnlc.reshape(-1,nmo*nocc)
 
-    if hybrid and cheap.with_sgx is not None:
-        # the cheap model's K, on its grid, for all the densities
-        vj = hessobj.get_jk_mo(mol, dms, mo_coeff, mo_occ, hermi=1, with_k=False)[0]
-        vk = cheap.with_sgx.get_k(dms, 1, omega, alpha, hyb)
+    # the seminumerical K of the cheap model of the two-level CPHF, or of the
+    # response under sgx_response
+    with_sgx = cheap.with_sgx
+    if with_sgx is None and hybrid:
+        with_sgx = rhf_hess._sgx_response_k(hessobj)
+    if hybrid and with_sgx is not None:
+        # K on its grid for all the densities; J as sgx_response asks
+        vj = rhf_hess._response_j_mo(hessobj, mol, dms, mo_coeff, mo_occ)
+        vk = with_sgx.get_k(dms, 1, omega, alpha, hyb)
         vk = rhf_hess._ao2mo(vk, mocc, mo_coeff).reshape(-1,nmo*nocc)
         v1 += vj - .5 * vk
     elif hybrid:
@@ -4496,7 +4501,7 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1, omega=None):
             vk *= hyb
         v1 += vj - .5 * vk
     else:
-        v1 += hessobj.get_jk_mo(mol, dms, mo_coeff, mo_occ, hermi=1, with_k=False)[0]
+        v1 += rhf_hess._response_j_mo(hessobj, mol, dms, mo_coeff, mo_occ)
 
     return v1
 

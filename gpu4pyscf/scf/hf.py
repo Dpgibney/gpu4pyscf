@@ -1516,6 +1516,16 @@ class SCF(pyscf_lib.StreamObject):
         from gpu4pyscf.sgx import sgx
         return sgx.cosx(self, with_sgx)
 
+    def RIJCOSX(self, auxbasis='def2-universal-jfit', with_sgx=None):
+        '''RI-J and seminumerical K, as ORCA's RIJCOSX and PySCF's mf.RIJCOSX:
+        J fitted in auxbasis (density_fit(only_dfj=True); 'aug_etb' for
+        pyscf.df.aug_etb), K by gpu4pyscf.sgx on its grid of level 1. An
+        approximation, with analytical gradients.'''
+        if isinstance(auxbasis, str) and auxbasis.lower().replace('-', '_') == 'aug_etb':
+            from pyscf.df import aug_etb
+            auxbasis = aug_etb(self.mol)
+        return self.density_fit(auxbasis, only_dfj=True).COSX(with_sgx)
+
     def _transfer_attrs_(self, dst):
         '''This helper function transfers attributes from one SCF object to
         another SCF object. It is invoked by to_ks and to_hf methods.

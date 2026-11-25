@@ -352,3 +352,34 @@ def test_cphf_atom_block():
     assert [f(n, 3) for n in (40, 3, 2)] == [3, 3, 2]
     with pytest.raises(RuntimeError):
         f(0, 3)
+
+@pytest.mark.parametrize('case', ['rks_b3lyp', 'uks_wb97mv'])
+def test_sgx_response(case):
+    # The approximation of the response's J and K, off by default: the
+    # seminumerical K, with the exact J or RI-J, in every response of the CPHF
+    # equations (also the two-level CPHF's cheap model's); the SCF, the
+    # derivative integrals and the XC and VV10 terms exact
+    ref = _reference(case)
+    mf = _converged(case)
+    assert not mf.Hessian().sgx_response
+    errs = {}
+    for auxbasis in (None, 'aug_etb'):
+        for dtype in ('double', 'float'):
+            hobj = mf.Hessian()
+            hobj.sgx_response = True
+            hobj.sgx_response_auxbasis = auxbasis
+            hobj.sgx_response_dtype = dtype
+            errs[auxbasis, dtype] = abs(np.asarray(hobj.kernel()) - ref).max()
+    print(case, 'sgx_response: max |dH| against the exact response', errs)
+    # (measured: 3.1e-6 and 3.7e-6 with the exact J, 1.4e-4 and 1.2e-4 with RI-J,
+    # whose aug_etb basis of 6-31G* is a small one; HCN in def2-TZVP 6e-7 and 2e-6)
+    for dtype in ('double', 'float'):
+        assert 1e-9 < errs[None, dtype] < 2e-5
+        assert errs[None, dtype] < errs['aug_etb', dtype] < 5e-4
+    assert abs(errs[None, 'float'] - errs[None, 'double']) < 1e-7
+
+def test_sgx_response_hf():
+    hobj = _converged('rhf').Hessian()
+    hobj.sgx_response = True
+    with pytest.raises(NotImplementedError):
+        hobj.kernel()
