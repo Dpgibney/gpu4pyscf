@@ -20,6 +20,7 @@ Non-relativistic UKS analytical Hessian
 import cupy
 import numpy
 import cupy as cp
+from concurrent.futures import ThreadPoolExecutor
 from pyscf import lib
 from gpu4pyscf.hessian import rhf as rhf_hess
 from gpu4pyscf.hessian import uhf as uhf_hess
@@ -27,7 +28,7 @@ from gpu4pyscf.hessian.rhf import _ao2mo
 from gpu4pyscf.hessian.rks import get_dweight_dA, get_d2weight_dAdB, get_d2mu_dr2, get_d3mu_dr3
 from gpu4pyscf.hessian.rks import (_get_enlc_deriv2, _get_vnlc_deriv1, nr_rks_fnlc_mo, get_nlc_response_ground_state,
                                    _gen_vind_keeping_nlc_ground_state, _gen_vind_cheap, _hess_elec_sharing_nlc,
-                                   _CheapResponse, _nlc_response_scf)
+                                   _CheapResponse, _nlc_response_scf, _fxc_mo_add_block)
 from gpu4pyscf.hessian.rks import (MIN_BLK_SIZE, _block_ao_subset, _d1_dot_pair, _d1d2_dot_gemm,
                                    _add_d1d2_, _dR_rho1_sub_blocks, _dR_rho1_terms, _atom_sums,
                                    _contract_rho1_fxc_rows, _dR_rho1_atoms, _add_atom_rows_)
@@ -35,9 +36,10 @@ from gpu4pyscf.grad import rhf as rhf_grad
 from gpu4pyscf.grad import rks as rks_grad
 from gpu4pyscf.dft import numint
 from gpu4pyscf.dft.numint import _contract_rho1_fxc
-from gpu4pyscf.lib.cupy_helper import (contract, add_sparse, get_avail_mem, take_last2d, tag_array)
+from gpu4pyscf.lib.cupy_helper import (contract, add_sparse, get_avail_mem, take_last2d, tag_array,
+                                       reduce_to_device, transpose_sum)
 from gpu4pyscf.lib import logger
-from gpu4pyscf.__config__ import min_grid_blksize
+from gpu4pyscf.__config__ import min_grid_blksize, num_devices
 
 def partial_hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
                       atmlst=None, max_memory=4000, verbose=None):
@@ -1845,6 +1847,148 @@ def _get_vxc_deriv1_grid_response(hessobj, mo_coeff, mo_occ, max_memory):
 
     return (dFock_mo_occa, dFock_mo_occb)
 
+# get_veff_resp_mo takes the XC response in the MO basis from nr_uks_fxc_mo; False: from the AO matrices of
+# NumInt.nr_uks_fxc
+NR_UKS_FXC_MO = True
+
+def _nr_uks_fxc_mo_task(ni, mol, grids, xc_code, fxc, mo_coeff, mo1, mocc,
+                        verbose=None, hermi=1, device_id=0):
+    '''nr_uks_fxc_mo on one device: hessian.rks._nr_rks_fxc_mo_task for the two spins, whose densities the
+    kernel fxc [2,ncomp,2,ncomp,ngrids] couples. mo_coeff, mo1 [nset,nao,nocc_s] and mocc are pairs (alpha,
+    beta) in the AO order of the grid's sorted mol.'''
+    with cupy.cuda.Device(device_id):
+        mo_coeff = [cupy.asarray(x) for x in mo_coeff]
+        mo1 = [cupy.asarray(x) for x in mo1]
+        mocc = [cupy.asarray(x) for x in mocc]
+        fxc = cupy.asarray(fxc)
+
+        assert isinstance(verbose, int)
+        log = logger.new_logger(mol, verbose)
+        xctype = ni._xc_type(xc_code)
+        opt = getattr(ni, 'gdftopt', None)
+
+        _sorted_mol = opt.mol
+        nao = mol.nao
+        nset = mo1[0].shape[0]
+        if xctype == 'NLC':
+            raise NotImplementedError('NLC')
+        vmo = [cupy.zeros((nset, nao, x.shape[1])) for x in mocc]
+        vmat = [None, None]
+
+        if xctype in ['LDA', 'HF']:
+            ao_deriv = 0
+        else:
+            ao_deriv = 1
+
+        ngrids_glob = grids.coords.shape[0]
+        grid_start, grid_end = numint.gen_grid_range(ngrids_glob, device_id)
+        ngrids_local = grid_end - grid_start
+        log.debug(f"{ngrids_local} grids on Device {device_id}")
+
+        p0 = p1 = grid_start
+        t1 = t0 = log.init_timer()
+        if xctype == 'LDA':
+            ncomp = 1
+        elif xctype == 'GGA':
+            ncomp = 4
+        else:
+            ncomp = 5
+        rho1_buf = cupy.empty(2*nset*ncomp*MIN_BLK_SIZE)
+        fxc_w_buf = cupy.empty(2*ncomp*2*ncomp*MIN_BLK_SIZE)
+        buf = cupy.empty(MIN_BLK_SIZE * nao)
+        vtmp_buf = cupy.empty(nao*nao)
+        for ao, mask, weights, coords in ni.block_loop(_sorted_mol, grids, nao, ao_deriv,
+                                                       max_memory=None, blksize=None,
+                                                       grid_range=(grid_start, grid_end)):
+            blk_size = len(weights)
+            p0, p1 = p1, p1+blk_size
+            if xctype == 'HF':
+                continue
+            occ_coeff_mask = [x[mask] for x in mocc]
+            rho1 = cupy.ndarray((2, nset, ncomp, blk_size), memptr=rho1_buf.data)
+            for s in range(2):
+                if mocc[s].shape[1] > 0:
+                    numint.eval_rho4(_sorted_mol, ao, occ_coeff_mask[s], mo1[s][:,mask],
+                                     xctype=xctype, hermi=hermi, out=rho1[s])
+                else:
+                    rho1[s] = 0
+            t1 = log.timer_debug2('eval rho', *t1)
+            fxc_w = cupy.ndarray((2, ncomp, 2, ncomp, blk_size), memptr=fxc_w_buf.data)
+            fxc_w = cupy.multiply(fxc[:,:,:,:,p0:p1], weights, out=fxc_w)
+            # the potentials of spin t from the densities of both spins s (as _contract_rho1_fxc)
+            wv = contract('skxg,tysxg->tkyg', rho1, fxc_w)
+            if xctype != 'LDA':
+                wv[:,:,0] *= .5
+            if xctype == 'MGGA':
+                wv[:,:,4] *= .5
+
+            for s in range(2):
+                if mocc[s].shape[1] > 0:
+                    vmat[s] = _fxc_mo_add_block(vmo[s], vmat[s], ao, mask, occ_coeff_mask[s], wv[s],
+                                                xctype, buf, vtmp_buf)
+
+            t1 = log.timer_debug2('integration', *t1)
+            ao = wv = None
+        t0 = log.timer_debug1(f'vxc on Device {device_id} ', *t0)
+        out = []
+        for s in range(2):
+            if mocc[s].shape[1] == 0:
+                out.append(cupy.zeros((nset, mo_coeff[s].shape[1], 0)))
+                continue
+            if vmat[s] is not None:
+                if xctype != 'LDA':
+                    transpose_sum(vmat[s])
+                vmo[s] += contract('nij,jo->nio', vmat[s], mocc[s])
+                vmat[s] = None
+            out.append(contract('nio,ip->npo', vmo[s], mo_coeff[s]))
+            vmo[s] = None
+    return out
+
+def nr_uks_fxc_mo(ni, mol, grids, xc_code, dm0=None, dms=None, mo_coeff=None, mo_occ=None,
+                  relativity=0, hermi=0, rho0=None, vxc=None, fxc=None, max_memory=2000, verbose=None):
+    '''The XC response of NumInt.nr_uks_fxc in the MO basis, as hessian.rks.nr_rks_fxc_mo for the two spins:
+    (C_a^T V_a[k] C_occ,a, C_b^T V_b[k] C_occ,b), [nset,nmo,nocc_s] each, for the symmetric first-order
+    densities dms [2,nset,nao,nao] tagged with their first-order orbitals mo1 [2,nset,nao,nocc] and the
+    occupied orbitals occ_coeff [2,nao,nocc] (hessian.uhf.gen_vind; the columns of beta beyond its occupied
+    orbitals are padding). The densities and the potentials are made from the orbitals: no AO matrix of
+    either.'''
+    log = logger.new_logger(mol, verbose)
+    t0 = log.init_timer()
+    if fxc is None:
+        raise RuntimeError('fxc was not initialized')
+    assert hasattr(dms, 'mo1')
+    opt = getattr(ni, 'gdftopt', None)
+    if opt is None or mol not in [opt.mol, opt._sorted_mol]:
+        ni.build(mol, grids.coords)
+        opt = ni.gdftopt
+
+    nocc = [int((cupy.asarray(mo_occ[s]) > 0).sum()) for s in range(2)]
+    nset, nao = dms.mo1.shape[1:3]
+    mo1 = []
+    mocc = []
+    for s in range(2):
+        if nocc[s] == 0:  # a spin without electrons
+            mo1.append(cupy.zeros((nset, nao, 0)))
+            mocc.append(cupy.zeros((nao, 0)))
+        else:
+            mo1.append(opt.sort_orbitals(cupy.asarray(dms.mo1[s])[:,:,:nocc[s]], axis=[1]))
+            mocc.append(opt.sort_orbitals(cupy.asarray(dms.occ_coeff[s])[:,:nocc[s]], axis=[0]))
+    mo_coeff = [opt.sort_orbitals(cupy.asarray(mo_coeff[s]), axis=[0]) for s in range(2)]
+
+    futures = []
+    cupy.cuda.get_current_stream().synchronize()
+    with ThreadPoolExecutor(max_workers=num_devices) as executor:
+        for device_id in range(num_devices):
+            future = executor.submit(
+                _nr_uks_fxc_mo_task,
+                ni, mol, grids, xc_code, fxc, mo_coeff, mo1, mocc,
+                verbose=log.verbose, hermi=hermi, device_id=device_id)
+            futures.append(future)
+    results = [future.result() for future in futures]
+    vmo = [cupy.asarray(reduce_to_device([r[s] for r in results], inplace=True)) for s in range(2)]
+    t0 = log.timer_debug1('nr_uks_fxc', *t0)
+    return vmo
+
 def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1):
     mol = hessobj.mol
     mf = hessobj.base
@@ -1881,12 +2025,22 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1):
 
     rho0, vxc, fxc = ni.cache_xc_kernel(mol, grids, mf.xc,
                                         mo_coeff, mo_occ, 1)
-    v1 = ni.nr_uks_fxc(mol, grids, mf.xc, None, dms, 0, hermi,
-                        rho0, vxc, fxc, max_memory=None)
     nset = dms.shape[1]
     v1vo = cupy.empty([nset, nmoa*nocca+nmob*noccb])
-    v1vo[:,:nmoa*nocca] = _ao2mo(v1[0], mocca, mo_coeff[0]).reshape(-1,nmoa*nocca)
-    v1vo[:,nmoa*nocca:] = _ao2mo(v1[1], moccb, mo_coeff[1]).reshape(-1,nmob*noccb)
+    if NR_UKS_FXC_MO and hasattr(dms, 'mo1'):
+        # in the MO basis from the first-order orbitals of the densities (hessian.uhf.gen_vind), without
+        # the AO matrices of the response
+        v1a, v1b = nr_uks_fxc_mo(ni, mol, grids, mf.xc, None, dms, mo_coeff, mo_occ, 0, hermi,
+                                 rho0, vxc, fxc, max_memory=None)
+        v1vo[:,:nmoa*nocca] = v1a.reshape(-1,nmoa*nocca)
+        v1vo[:,nmoa*nocca:] = v1b.reshape(-1,nmob*noccb)
+        v1a = v1b = None
+    else:
+        v1 = ni.nr_uks_fxc(mol, grids, mf.xc, None, dms, 0, hermi,
+                           rho0, vxc, fxc, max_memory=None)
+        v1vo[:,:nmoa*nocca] = _ao2mo(v1[0], mocca, mo_coeff[0]).reshape(-1,nmoa*nocca)
+        v1vo[:,nmoa*nocca:] = _ao2mo(v1[1], moccb, mo_coeff[1]).reshape(-1,nmob*noccb)
+        v1 = None
 
     if mf.do_nlc():
         # inside gen_vind's fx, the ground-state part kept for all CPHF cycles (built in the first)
