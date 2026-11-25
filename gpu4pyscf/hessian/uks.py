@@ -2051,10 +2051,15 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1):
         v1vo[:,:nmoa*nocca] += vnlca.reshape(-1, nmoa*nocca)
         v1vo[:,nmoa*nocca:] += vnlcb.reshape(-1, nmob*noccb)
 
-    if hybrid and cheap.with_sgx is not None:
-        # the cheap model's K, on its grid, for the densities of both spins
-        vj = hessobj.get_jk_mo(mol, dms, mo_coeff, mo_occ, hermi=1, with_k=False)[0]
-        vk = cheap.with_sgx.get_k(dms.reshape(-1,nao,nao), 1, omega, alpha, hyb).reshape(dms.shape)
+    # the seminumerical K of the cheap model of the two-level CPHF, or of the
+    # response under sgx_response
+    with_sgx = cheap.with_sgx
+    if with_sgx is None and hybrid:
+        with_sgx = rhf_hess._sgx_response_k(hessobj)
+    if hybrid and with_sgx is not None:
+        # K on its grid for the densities of both spins; J as sgx_response asks
+        vj = rhf_hess._response_j_mo(hessobj, mol, dms, mo_coeff, mo_occ)
+        vk = with_sgx.get_k(dms.reshape(-1,nao,nao), 1, omega, alpha, hyb).reshape(dms.shape)
         v1vo += vj
         v1vo[:,:nmoa*nocca] -= _ao2mo(vk[0], mocca, mo_coeff[0]).reshape(-1,nmoa*nocca)
         v1vo[:,nmoa*nocca:] -= _ao2mo(vk[1], moccb, mo_coeff[1]).reshape(-1,nmob*noccb)
@@ -2077,7 +2082,7 @@ def get_veff_resp_mo(hessobj, mol, dms, mo_coeff, mo_occ, hermi=1):
             vk *= hyb
         v1vo += vj - vk
     else:
-        v1vo += hessobj.get_jk_mo(mol, dms, mo_coeff, mo_occ, hermi=1, with_k=False)[0]
+        v1vo += rhf_hess._response_j_mo(hessobj, mol, dms, mo_coeff, mo_occ)
     return v1vo
 
 def nr_uks_fnlc_mo(mf, mol, mo_coeff, mo_occ, dm1s, return_in_mo=True, ground_state=None):
