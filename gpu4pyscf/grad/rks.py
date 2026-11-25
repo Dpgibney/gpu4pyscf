@@ -107,6 +107,13 @@ def _jk_energy_per_atom(ks_grad, dm, verbose=None):
     if omega == 0:
         return ks_grad.jk_energy_per_atom(dm, 1., hyb, verbose=verbose)
     omega = abs(omega)
+    if getattr(ks_grad, '_k_mixed_range', False):
+        # a gradient object whose K of both ranges comes from one pass (the
+        # seminumerical exchange, sgx._COSXGradients)
+        ejk = ks_grad.jk_energy_per_atom(dm, 1., 0., verbose=verbose)
+        ejk += ks_grad.jk_energy_per_atom(dm, 0., 1., omega=omega, lr_factor=alpha,
+                                          sr_factor=hyb, verbose=verbose)
+        return ejk
     if alpha == 0: # LR=0, only SR exchange
         ejk = ks_grad.jk_energy_per_atom(dm, 1., 0., verbose=verbose)
         ejk += ks_grad.jk_energy_per_atom(dm, 0., hyb, omega=-omega, verbose=verbose)

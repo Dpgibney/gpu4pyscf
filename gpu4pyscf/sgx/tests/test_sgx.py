@@ -203,3 +203,140 @@ def test_cosx_solvent_and_dfj():
     e1 = mf.kernel()
     assert mf.converged
     assert 1e-9 < abs(e1 - e0) < 1e-4
+
+# The gradients of the seminumerical exchange
+
+def _fd(fn, atom_xyz, ia, x, h=1e-4):
+    '''(fn(R + h e) - fn(R - h e)) / 2h for the coordinate x of atom ia (Bohr)'''
+    e = []
+    for sgn in (1, -1):
+        xyz = np.array(atom_xyz, dtype=float)
+        xyz[ia, x] += sgn * h
+        e.append(fn(xyz))
+    return (e[0] - e[1]) / (2 * h)
+
+def _mol_at(mol, xyz, **kwargs):
+    m = mol.copy()
+    m.set_geom_(xyz, unit='Bohr')
+    m.verbose = 0
+    for k, v in kwargs.items():
+        setattr(m, k, v)
+    return m
+
+@pytest.mark.parametrize('c_full,c_lr', [(1., 0.), (0., 1.), (.15, .85)])
+def test_kernels_ip1(c_full, c_lr):
+    # The derivatives of the integrals with respect to the center of their
+    # first function, from the kernels of the shells of l+1 and l-1
+    # (contract_ip1), against libcint's int1e_grids_ip, through f functions
+    mol = pyscf.M(atom=atom, basis='def2-tzvp', verbose=0)
+    omega = .3
+    coords = _points(mol, 200)
+    rng = np.random.default_rng(5)
+    f = rng.normal(size=(mol.nao, len(coords)))
+    ip = c_full * mol.intor('int1e_grids_ip', grids=coords)
+    if c_lr:
+        with mol.with_range_coulomb(omega):
+            ip += c_lr * mol.intor('int1e_grids_ip', grids=coords)
+    # <d/dr a| = -d/dA_a
+    ref = -np.einsum('xgmn,ng->xmg', ip, f)
+    smol = SortedGTO.from_mol(mol, decontract=True, diffuse_cutoff=0.3)
+    data = sgx_jk.deriv_pair_data(smol, omega, c_full, c_lr)
+    for dtype, tol in (('double', 1e-10), ('float', 3e-5)):
+        devd = sgx_jk._DeviceDerivPairs(data, omega, c_full, c_lr, dtype)
+        fc = cp.ascontiguousarray(smol.apply_C_dot(cp.asarray(f)), dtype=devd.real)
+        dgc = sgx_jk.contract_ip1(devd, fc, cp.asarray(coords.T))
+        dg = cp.asarray([smol.apply_CT_dot(cp.asarray(dgc[x], dtype=np.float64))
+                         for x in range(3)]).get()
+        assert abs(dg - ref).max() < tol * abs(ref).max()
+
+def test_lko_weight_derivs():
+    # The derivatives of the weights of the SGX grid (its LKO partition), the
+    # points moving with their atoms: sum_g w_g phi(r_g) of a fixed phi against
+    # finite differences. (PySCF's VXCgen_grid_lko_deriv is about 1e-6 off
+    # here: it differentiates 1/f(R) of the partition as 1/R.)
+    mol = pyscf.M(atom=atom, basis='def2-svp', verbose=0)
+    cen = np.array([[0.3, 0.5, 0.4], [0.5, -1.6, -2.2], [1.0, 1.9, -2.6]])
+    ex = np.array([0.7, 0.9, 1.3])
+    def phi(r):
+        d = r[:,None,:] - cen[None]
+        return np.exp(-ex * (d**2).sum(axis=2)).sum(axis=1)
+    def dphi(r):
+        d = r[:,None,:] - cen[None]
+        e = np.exp(-ex * (d**2).sum(axis=2))
+        return (-2 * ex[None,:,None] * d * e[:,:,None]).sum(axis=1)
+    def quad(xyz):
+        s = sgx.SGX(_mol_at(mol, xyz)).build()
+        return float((s._weights.get() * phi(s._coords.T.get())).sum())
+    s = sgx.SGX(mol).build()
+    r = s._coords.T.get()
+    w = s._weights.get()
+    ana = s._dweights_dot(cp.asarray(phi(r)))
+    atm = np.asarray(s.grids.atm_idx[s._grid_idx])
+    g = w[:,None] * dphi(r)
+    for x in range(3):
+        ana[:,x] += np.bincount(atm, g[:,x], minlength=mol.natm)
+    xyz = mol.atom_coords()
+    for ia, x in ((0, 2), (1, 1), (3, 0)):
+        assert abs(ana[ia,x] - _fd(quad, xyz, ia, x)) < 1e-8
+
+@pytest.mark.parametrize('spin', [0, 1])
+@pytest.mark.parametrize('fit_ovlp', [True, False])
+def test_k_grad(spin, fit_ovlp):
+    # SGX.get_k_grad, the derivative of sum_n tr(D_n K[D_n]) at fixed D_n
+    # (the grid, its weights and the overlap fit rebuilt at each geometry),
+    # for the full-range and the mixed operator, against finite differences
+    mol = pyscf.M(atom=atom, basis='def2-svp', charge=spin, spin=spin, verbose=0)
+    mf = (scf.RHF if spin == 0 else scf.UHF)(mol).run(conv_tol=1e-10)
+    dm = cp.asarray(mf.make_rdm1())
+    dms = dm if dm.ndim == 3 else dm[None]
+    xyz = mol.atom_coords()
+    for omega, lr, sr in ((None, None, None), (.3, 1., .15)):
+        def energy(r):
+            s = sgx.SGX(_mol_at(mol, r))
+            s.fit_ovlp = fit_ovlp
+            return float(cp.einsum('nij,nji->', dms, s.get_k(dms, 1, omega, lr, sr)))
+        s = sgx.SGX(mol)
+        s.fit_ovlp = fit_ovlp
+        ana = s.get_k_grad(dms, omega, lr, sr)
+        assert abs(ana.sum(axis=0)).max() < 1e-11
+        for ia, x in ((0, 2), (2, 0)):
+            assert abs(ana[ia,x] - _fd(energy, xyz, ia, x)) < 3e-8 * max(1, abs(ana).max())
+        # the integrals in single precision
+        s.kernel_dtype = 'float'
+        assert abs(s.get_k_grad(dms, omega, lr, sr) - ana).max() < 2e-5 * abs(ana).max()
+
+@pytest.mark.parametrize('case', ['rks_b3lyp', 'uks_wb97x_rijcosx_smd'])
+def test_cosx_gradients(case):
+    # The analytical gradients of COSX models against finite differences of
+    # their energies: J from the J engine (B3LYP), fitted J of RIJCOSX with a
+    # solvent (an open shell, range-separated exchange in one pass)
+    spin = 1 if 'uks' in case else 0
+    mol = pyscf.M(atom='O 0 0 0; H 0 -0.767 0.582; H 0.1 0.751 0.61', basis='def2-svp',
+                  charge=spin, spin=spin, verbose=0)
+    def model(m):
+        mf = (dft.UKS if spin else dft.RKS)(m, xc='wb97x' if spin else 'b3lyp')
+        mf.grids.atom_grid = (60, 194)
+        mf.conv_tol = 1e-12
+        mf.conv_tol_grad = 1e-7
+        if 'rijcosx' in case:
+            mf = mf.RIJCOSX(auxbasis='aug_etb')
+        else:
+            mf = mf.COSX()
+        if 'smd' in case:
+            mf = mf.SMD()
+            mf.with_solvent.solvent = 'water'
+        return mf
+    mf = model(mol)
+    mf.kernel()
+    g = mf.Gradients()
+    g.grid_response = True
+    de = cp.asnumpy(g.kernel())
+    # (the solvent's CDS term comes from finite differences)
+    assert abs(de.sum(axis=0)).max() < (1e-6 if 'smd' in case else 1e-10)
+    xyz = mol.atom_coords()
+    for ia, x in ((0, 2), (1, 1)):
+        fd = _fd(lambda r: model(_mol_at(mol, r)).kernel(), xyz, ia, x)
+        assert abs(de[ia,x] - fd) < 2e-7
+    # the gradient without the grid response of the exchange is another one
+    g.sgx_grid_response = False
+    assert 1e-8 < abs(cp.asnumpy(g.kernel()) - de).max() < 1e-4
