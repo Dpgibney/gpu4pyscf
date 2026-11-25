@@ -281,6 +281,27 @@ H -0.646 -0.464 -0.804
         g2 = get_cds_grad(mf.with_solvent)
         assert abs(dat[0,:,2] - ((g2 - g1) / 2e-3 * BOHR)).max() < 1e-5
 
+    def test_cds_output(self):
+        # the geometries of the finite differences are written at the debug
+        # levels only
+        import io
+        from gpu4pyscf.solvent.hessian.smd import get_cds as get_cds_hess
+        out = {}
+        for verbose in (4, 6):
+            mol = gto.M(atom='''
+                        C        0.000000    0.000000   -0.542500
+                        H        0.000000    0.935307   -1.082500
+                        H        0.000000   -0.935307   -1.082500''', verbose=0)
+            mol.stdout = io.StringIO()
+            mol.verbose = verbose
+            mf = scf.RHF(mol).SMD('')
+            mf.with_solvent.solvent_descriptors = [1.3843, 1.3766, 0.0, 0.45, 35.06, 13.45, 0.0, 0.0]
+            get_cds_hess(mf.with_solvent)
+            assert mol.verbose == verbose
+            out[verbose] = mol.stdout.getvalue()
+        assert 'New geometry' not in out[4]
+        assert out[6].count('New geometry') == 18
+
     def test_hess(self):
         mol = gto.M(atom='''
         C        0.000000    0.000000   -0.542500
