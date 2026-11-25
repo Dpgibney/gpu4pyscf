@@ -18,7 +18,9 @@ import cupy as cp
 import pyscf
 from pyscf import lib
 from gpu4pyscf import scf, dft
+from gpu4pyscf.scf import cphf, ucphf
 from gpu4pyscf.hessian import rhf as rhf_hess
+from gpu4pyscf.hessian import uhf as uhf_hess
 
 # The CPHF equations of the Hessians: the residual solver
 # (HessianBase.cphf_residual_tol) against the Krylov solver, the two-level
@@ -262,3 +264,91 @@ def test_second_order_term_of_the_plain_solver():
     hobj.solve_mo1(cp.asarray(mf.mo_energy), mo_coeff, mo_occ, h1mo,
                    hobj.gen_vind(mo_coeff, mo_occ))
     assert abs(hobj._cphf_second_order).max() < 1e-12
+
+def _in_atom_blocks(hobj, natm_block):
+    '''Makes hobj solve its CPHF equations as on a device with the memory for
+    natm_block atoms at a time (solve_mo1 sizes its blocks by the available
+    memory). Returns the list that gets the number of perturbations of every
+    block.'''
+    unrestricted = isinstance(hobj.base, scf.uhf.UHF)
+    mod, solver = (uhf_hess, ucphf) if unrestricted else (rhf_hess, cphf)
+    nao = hobj.mol.nao
+    # the memory in which solve_mo1 counts natm_block atoms
+    avail = (natm_block + .5) * 8*nao*nao*3 * (6 / .3 if unrestricted else 3 / .5)
+    solve_mo1 = hobj.solve_mo1
+    solve_residual = solver.solve_residual
+    calls = []
+
+    def counted(*args, **kwargs):
+        # the solve of a block with the model's own response (the cheap
+        # model's solves of the two-level CPHF go through the same function,
+        # without this argument)
+        if 'second_order' in kwargs:
+            h1 = args[3]
+            calls.append(len(h1[0] if unrestricted else h1))
+        return solve_residual(*args, **kwargs)
+
+    def in_blocks(*args, **kwargs):
+        with lib.temporary_env(mod, get_avail_mem=lambda: avail), \
+                lib.temporary_env(solver, solve_residual=counted):
+            return solve_mo1(*args, **kwargs)
+
+    hobj.solve_mo1 = in_blocks
+    return calls
+
+@pytest.mark.parametrize('case', ['rhf', 'uhf', 'rks_wb97mv_smd', 'rks_b3lyp_df', 'uks_wb97mv'])
+def test_atom_blocks(case):
+    # The CPHF equations in blocks of atoms, as on a device without the memory
+    # for all the perturbations at once: the same Hessian, with the default
+    # settings (the two-level CPHF in every block)
+    ref = _reference(case)
+    mf = _converged(case)
+    natm = mf.mol.natm
+    for natm_block, blocks in ((natm, [natm*3]), (2, [6]*(natm//2)), (4, [12, (natm-4)*3])):
+        hobj = mf.Hessian()
+        calls = _in_atom_blocks(hobj, natm_block)
+        h = np.asarray(hobj.kernel())
+        assert calls == blocks
+        print(case, natm_block, 'atoms in a block: max |dH| =', abs(h - ref).max())
+        assert abs(h - ref).max() < 1e-6
+
+@pytest.mark.parametrize('case', ['rks_b3lyp', 'uks_wb97mv'])
+@pytest.mark.parametrize('two_level', [True, False])
+def test_atom_blocks_second_order_term(case, two_level):
+    # The term that takes the Hessian to second order in the residuals has a
+    # part for every pair of perturbations, also of two blocks, which the
+    # plain solver needs too once there are several blocks (the residuals of a
+    # block are orthogonal to the trial vectors of that block only). Loose
+    # residuals, so that the term shows
+    ref = _reference(case)
+    mf = _converged(case)
+    errors = {}
+    for with_term in (True, False):
+        hobj = mf.Hessian()
+        hobj.cphf_residual_tol = 3e-3
+        hobj.cphf_two_level = two_level
+        hobj.cphf_two_level_parts = ('xc', 'nlc', 'k')
+        calls = _in_atom_blocks(hobj, 2)
+        if with_term:
+            h = np.asarray(hobj.kernel())
+        else:
+            def none(kept, natm, factor):
+                return cp.zeros((natm,natm,3,3))
+            with lib.temporary_env(rhf_hess, _second_order_term=none):
+                h = np.asarray(hobj.kernel())
+        assert len(calls) == mf.mol.natm // 2
+        errors[with_term] = abs(h - ref).max()
+    print(case, 'two-level' if two_level else 'plain', 'blocks of 2 atoms: max |dH| with the term',
+          errors[True], 'without', errors[False])
+    # (measured, with / without: two-level 1.2e-6 / 8.3e-5 and 6.8e-6 / 8.4e-5,
+    # plain 1.3e-5 / 1.5e-4 and 1.1e-5 / 5.8e-5)
+    assert errors[True] < 3e-5
+    assert errors[True] < errors[False] * (.2 if two_level else .5)
+
+def test_cphf_atom_block():
+    # all the atoms; multiples of 16; below 16, what fits (upstream: an error)
+    f = rhf_hess._cphf_atom_block
+    assert [f(n, 57) for n in (1000, 57, 56, 33, 32, 31, 16, 15, 3, 1)] == [57, 57, 48, 32, 32, 16, 16, 15, 3, 1]
+    assert [f(n, 3) for n in (40, 3, 2)] == [3, 3, 2]
+    with pytest.raises(RuntimeError):
+        f(0, 3)

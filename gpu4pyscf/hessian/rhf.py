@@ -747,10 +747,7 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
     # *4 for input dm, vj, vk, and vxc
     blksize = int(min(avail_mem*.5 / (8*3*(nao*nocc*3+nao*nao)), # in MO
                       avail_mem*.5 / (8*nao*nao*3*3))) # vj, vk, dm in AO
-    if blksize < ALIGNED**2:
-        raise RuntimeError('GPU memory insufficient for solving CPHF equations')
-
-    blksize = (blksize // ALIGNED**2) * ALIGNED**2
+    blksize = _cphf_atom_block(blksize, natm)
     log.debug(f'GPU memory {avail_mem/GB:.1f} GB available')
     log.debug(f'{blksize} atoms in each block CPHF equation')
 
@@ -817,6 +814,20 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
         second_order['de2'] = _second_order_term(kept, natm, 4.)
     log.timer('CPHF solver', *t0)
     return mo1s, e1s
+
+def _cphf_atom_block(blksize, natm):
+    '''The atoms of a block of the CPHF equations (solve_mo1), from the number
+    blksize that the available memory takes at once: all natm atoms, or a
+    multiple of ALIGNED**2, or, below that, as many as fit (more blocks, each
+    with its own responses: slower, where upstream stopped for lack of the
+    memory for ALIGNED**2 atoms, also for molecules with fewer atoms).'''
+    if blksize < 1:
+        raise RuntimeError('GPU memory insufficient for solving CPHF equations')
+    if blksize >= natm:
+        return natm
+    if blksize >= ALIGNED**2:
+        return (blksize // ALIGNED**2) * ALIGNED**2
+    return blksize
 
 def _second_order_term(kept, natm, factor):
     '''-factor (x_A - x0_A) r_B as [natm,natm,3,3], from the pairs (x - x0, r)
