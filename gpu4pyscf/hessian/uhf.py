@@ -275,10 +275,7 @@ def solve_mo1(mf, mo_energy, mo_coeff, mo_occ, h1mo,
     # *8 for spin-up/down input dm, vj, vk, and vxc
     blksize = int(min(avail_mem*.3 / (8*3*nao*nocc*8),
                       avail_mem*.3 / (8*nao*nao*3*6)))  # in vj, vk, dm in AO
-    if blksize < ALIGNED**2:
-        raise RuntimeError('GPU memory insufficient')
-
-    blksize = (blksize // ALIGNED**2) * ALIGNED**2
+    blksize = rhf_hess_gpu._cphf_atom_block(blksize, mol.natm)
     log.debug(f'GPU memory {avail_mem/GB:.1f} GB available')
     log.debug(f'{blksize} atoms in each block CPHF equation')
 

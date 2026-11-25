@@ -1525,7 +1525,7 @@ def get_dqsym_dx(pcmobj, dm, atmlst, intopt_derivative):
 # They are kept on the device up to this part of its available memory (a
 # small one: the other terms of the response size their batches by what is
 # available), on the host up to this part of mol.max_memory, and not made
-# beyond that.
+# beyond that. The two spins of unrestricted orbitals have half of each.
 MO_INTEGRALS_DEVICE_FRACTION = .1
 MO_INTEGRALS_HOST_FRACTION = .5
 
@@ -1601,11 +1601,13 @@ class SurfaceMOIntegrals:
                 out += q[:,g0:g1].dot(cupy.asarray(self.t[g0:g1]))
         return out.reshape(len(q), self.nmo, self.nocc)
 
-def surface_mo_integrals(pcmobj, mo_coeff, mo_occ):
+def surface_mo_integrals(pcmobj, mo_coeff, mo_occ, share=1.):
     '''SurfaceMOIntegrals of pcmobj for the orbitals of one spin, or None:
     beyond the angular momenta of the kernels of sgx.int1e_grids, or where
     they fit neither on the device nor on the host
-    (MO_INTEGRALS_DEVICE_FRACTION, MO_INTEGRALS_HOST_FRACTION).'''
+    (MO_INTEGRALS_DEVICE_FRACTION, MO_INTEGRALS_HOST_FRACTION). share: the
+    part of those two limits that these integrals may take (.5 for each spin
+    of unrestricted orbitals, whose two sets are kept together).'''
     if (not pcmobj._intermediates or
         not any(isinstance(x, cupy.ndarray) for x in pcmobj._intermediates.values())):
         pcmobj.build()
@@ -1620,9 +1622,9 @@ def surface_mo_integrals(pcmobj, mo_coeff, mo_occ):
     ngrids = grid_coords.shape[0]
     nmo, nocc = c.shape[1], mocc.shape[1]
     nbytes = ngrids * nmo * nocc * 8
-    if nbytes <= get_avail_mem() * MO_INTEGRALS_DEVICE_FRACTION:
+    if nbytes <= get_avail_mem() * MO_INTEGRALS_DEVICE_FRACTION * share:
         t = cupy.empty((ngrids, nmo, nocc))
-    elif nbytes <= mol.max_memory * 1e6 * MO_INTEGRALS_HOST_FRACTION:
+    elif nbytes <= mol.max_memory * 1e6 * MO_INTEGRALS_HOST_FRACTION * share:
         t = numpy.empty((ngrids, nmo, nocc))
     else:
         return None
@@ -1644,9 +1646,14 @@ def _mo_integrals_of(hessobj, mo_coeff, mo_occ):
         hessobj._solvent_mo_integrals = kept = None
     solvent = hessobj.base.with_solvent
     if unrestricted:
-        ints = tuple(surface_mo_integrals(solvent, mo_coeff[k], mo_occ[k]) for k in range(2))
-        if ints[0] is None or ints[1] is None:
-            ints = None
+        # the two spins share the limits; the larger set first, so that no
+        # integrals are made where the two do not fit
+        ints = []
+        for k in range(2):
+            ints.append(surface_mo_integrals(solvent, mo_coeff[k], mo_occ[k], share=.5))
+            if ints[-1] is None:
+                break
+        ints = None if ints[-1] is None else tuple(ints)
     else:
         ints = surface_mo_integrals(solvent, mo_coeff, mo_occ)
     hessobj._solvent_mo_integrals = ints

@@ -883,6 +883,18 @@ H       0.7570000000     0.0000000000    -0.4696000000
                     test = analytical_grad_vmat(pcmobj, dm, c, occ, mo_integrals=one)
                     assert float(abs(test - ref).max()) < 1e-11 * float(abs(ref).max())
 
+            if spin:
+                # the two spins share the limits: none where one set would fit and the two do not
+                nmo = mo_coeff.shape[-1]
+                nbytes = pcmobj.surface['grid_coords'].shape[0] * nmo * int((mo_occ[0] > 0).sum()) * 8
+                for factor, kept in ((1.5, False), (2.1, True)):
+                    with lib.temporary_env(pcm_hessian, MO_INTEGRALS_DEVICE_FRACTION=0.,
+                                           MO_INTEGRALS_HOST_FRACTION=factor * nbytes / (mol.max_memory * 1e6)):
+                        hobj._solvent_mo_integrals = None
+                        ints = pcm_hessian._mo_integrals_of(hobj, mo_coeff, mo_occ)
+                    assert (ints is not None) == kept
+                hobj._solvent_mo_integrals = None
+
             # the Hessian with them, on the device and on the host, and without
             hessians = []
             for device_fraction, host_fraction in ((.5, .5), (0., .5), (0., 0.)):

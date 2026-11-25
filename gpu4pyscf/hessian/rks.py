@@ -3737,6 +3737,74 @@ def _get_exc_deriv2_grid_response(hessobj, mo_coeff, mo_occ, max_memory):
 
     return d2e
 
+# GEMMs per density of a grid block's XC response by functional type: (in the MO form, on nao_sub x nocc;
+# in the AO form, on nao_sub x nao_sub). See _fxc_mo_add_block
+_FXC_MO_GEMMS = {'LDA': (1, 1), 'GGA': (2, 1), 'MGGA': (5, 4)}
+
+def _fxc_mo_add_block(vmo, vmat, ao, mask, occ_coeff_mask, wv, xctype, buf, vtmp_buf):
+    '''A grid block's part of the XC response in the form nr_rks_fxc_mo returns: adds the matrices of the
+    potentials wv [nset,ncomp,ngrids of the block] (halved where the matrix is V + V^T, as there) times the
+    occupied orbitals to vmo [nset,nao,nocc]. ao are the block's AO values (and gradients) for its AOs mask,
+    occ_coeff_mask the rows of the occupied orbitals for them. The response is needed in the MO basis,
+    C^T V C_occ, so the block adds its part of V C_occ directly: GEMMs of nao_sub x nocc per density instead
+    of nao_sub x nao_sub. A block whose screened AOs are too few for that to pay off (gemms_mo * nocc >=
+    gemms_ao * nao_sub, GEMMs per density) adds to the AO matrices vmat [nset,nao,nao] as nr_rks_fxc does;
+    vmat is made at the first such block and returned (None if there was none): the caller adds V C_occ of
+    it at the end, after transpose_sum for all but LDA.'''
+    nset, nao, nocc = vmo.shape
+    nao_sub = len(mask)
+    blk_size = wv.shape[-1]
+    gemms_mo, gemms_ao = _FXC_MO_GEMMS.get(xctype, _FXC_MO_GEMMS['MGGA'])
+    if gemms_mo * nocc < gemms_ao * nao_sub:
+        if xctype == 'LDA':
+            psi = contract('io,ig->og', occ_coeff_mask, ao)
+        else:
+            psi = contract('nig,io->nog', ao, occ_coeff_mask)
+        # densities per batch: about 256 MB of intermediates
+        nbatch = max(1, int(2**25 / (blk_size*(nao_sub+2*nocc) + nao_sub*nocc)))
+        for i0 in range(0, nset, nbatch):
+            i1 = min(i0 + nbatch, nset)
+            nb = i1 - i0
+            # GEMMs in the layouts cuBLAS takes directly: v1 is (nao_sub, nb*nocc),
+            # v2 is (nb*nao_sub, nocc)
+            if xctype == 'LDA':
+                v1 = ao.dot((wv[i0:i1,0,None] * psi).reshape(nb*nocc, blk_size).T)
+                v2 = v1.reshape(nao_sub, nb, nocc).transpose(1, 0, 2)
+            else:
+                # V = A + A^T (+ the meta-GGA tau term, symmetric) with
+                # A = ao[0] (sum_k wv[k] ao[k])^T
+                wvi = cupy.ascontiguousarray(wv[i0:i1,:4])
+                x = contract('ang,nog->aog', wvi, psi[:4])
+                v1 = ao[0].dot(x.reshape(nb*nocc, blk_size).T)
+                x = None
+                if xctype == 'MGGA':
+                    for k in range(1, 4):
+                        v1 += ao[k].dot((wv[i0:i1,4,None] * psi[k]).reshape(nb*nocc, blk_size).T)
+                aow = contract('ang,nig->aig', wvi, ao[:4])
+                v2 = aow.reshape(nb*nao_sub, blk_size).dot(psi[0].T).reshape(nb, nao_sub, nocc)
+                aow = None
+                v2 += v1.reshape(nao_sub, nb, nocc).transpose(1, 0, 2)
+            vmo[i0:i1,mask] += v2
+            v1 = v2 = None
+        psi = None
+    else:
+        if vmat is None:
+            vmat = cupy.zeros((nset, nao, nao))
+        vtmp = cupy.ndarray((nao_sub, nao_sub), memptr=vtmp_buf.data)
+        for i in range(nset):
+            if xctype == 'LDA':
+                aow = numint._scale_ao(ao, wv[i][0], out=buf)
+                add_sparse(vmat[i], ao.dot(aow.T, out=vtmp), mask)
+            elif xctype == 'GGA':
+                aow = numint._scale_ao(ao, wv[i], out=buf)
+                add_sparse(vmat[i], ao[0].dot(aow.T, out=vtmp), mask)
+            else:
+                vtmp = numint._tau_dot(ao, ao, wv[i,4], buf=buf, out=vtmp)
+                aow = numint._scale_ao(ao[:4], wv[i,:4], out=buf)
+                vtmp = contract('ig, jg->ij', ao[0], aow, beta=1, out=vtmp) # ao[0].dot(aow.T, out=vtmp)
+                add_sparse(vmat[i], vtmp, mask)
+    return vmat
+
 def _nr_rks_fxc_mo_task(ni, mol, grids, xc_code, fxc, mo_coeff, mo1, mocc,
                         verbose=None, hermi=1, device_id=0):
     with cupy.cuda.Device(device_id):
@@ -3762,7 +3830,6 @@ def _nr_rks_fxc_mo_task(ni, mol, grids, xc_code, fxc, mo_coeff, mo1, mocc,
             raise NotImplementedError('NLC')
         vmo = cupy.zeros((nset, nao, nocc))
         vmat = None
-        gemms_mo, gemms_ao = {'LDA': (1, 1), 'GGA': (2, 1)}.get(xctype, (5, 4))
 
         if xctype in ['LDA', 'HF']:
             ao_deriv = 0
@@ -3790,8 +3857,6 @@ def _nr_rks_fxc_mo_task(ni, mol, grids, xc_code, fxc, mo_coeff, mo1, mocc,
                                                        max_memory=None, blksize=None,
                                                        grid_range=(grid_start, grid_end)):
             blk_size = len(weights)
-            nao_sub = len(mask)
-            vtmp = cupy.ndarray((nao_sub, nao_sub), memptr=vtmp_buf.data)
 
             p0, p1 = p1, p1+len(weights)
             occ_coeff_mask = mocc[mask]
@@ -3810,53 +3875,7 @@ def _nr_rks_fxc_mo_task(ni, mol, grids, xc_code, fxc, mo_coeff, mo1, mocc,
             if xctype == 'MGGA':
                 wv[:,4] *= .5
 
-            if gemms_mo * nocc < gemms_ao * nao_sub:
-                if xctype == 'LDA':
-                    psi = contract('io,ig->og', occ_coeff_mask, ao)
-                else:
-                    psi = contract('nig,io->nog', ao, occ_coeff_mask)
-                # densities per batch: about 256 MB of intermediates
-                nbatch = max(1, int(2**25 / (blk_size*(nao_sub+2*nocc) + nao_sub*nocc)))
-                for i0 in range(0, nset, nbatch):
-                    i1 = min(i0 + nbatch, nset)
-                    nb = i1 - i0
-                    # GEMMs in the layouts cuBLAS takes directly: v1 is (nao_sub, nb*nocc),
-                    # v2 is (nb*nao_sub, nocc)
-                    if xctype == 'LDA':
-                        v1 = ao.dot((wv[i0:i1,0,None] * psi).reshape(nb*nocc, blk_size).T)
-                        v2 = v1.reshape(nao_sub, nb, nocc).transpose(1, 0, 2)
-                    else:
-                        # V = A + A^T (+ the meta-GGA tau term, symmetric) with
-                        # A = ao[0] (sum_k wv[k] ao[k])^T
-                        wvi = cupy.ascontiguousarray(wv[i0:i1,:4])
-                        x = contract('ang,nog->aog', wvi, psi[:4])
-                        v1 = ao[0].dot(x.reshape(nb*nocc, blk_size).T)
-                        x = None
-                        if xctype == 'MGGA':
-                            for k in range(1, 4):
-                                v1 += ao[k].dot((wv[i0:i1,4,None] * psi[k]).reshape(nb*nocc, blk_size).T)
-                        aow = contract('ang,nig->aig', wvi, ao[:4])
-                        v2 = aow.reshape(nb*nao_sub, blk_size).dot(psi[0].T).reshape(nb, nao_sub, nocc)
-                        aow = None
-                        v2 += v1.reshape(nao_sub, nb, nocc).transpose(1, 0, 2)
-                    vmo[i0:i1,mask] += v2
-                    v1 = v2 = None
-                psi = None
-            else:
-                if vmat is None:
-                    vmat = cupy.zeros((nset, nao, nao))
-                for i in range(nset):
-                    if xctype == 'LDA':
-                        aow = numint._scale_ao(ao, wv[i][0], out=buf)
-                        add_sparse(vmat[i], ao.dot(aow.T, out=vtmp), mask)
-                    elif xctype == 'GGA':
-                        aow = numint._scale_ao(ao, wv[i], out=buf)
-                        add_sparse(vmat[i], ao[0].dot(aow.T, out=vtmp), mask)
-                    else:
-                        vtmp = numint._tau_dot(ao, ao, wv[i,4], buf=buf, out=vtmp)
-                        aow = numint._scale_ao(ao[:4], wv[i,:4], out=buf)
-                        vtmp = contract('ig, jg->ij', ao[0], aow, beta=1, out=vtmp) # ao[0].dot(aow.T, out=vtmp)
-                        add_sparse(vmat[i], vtmp, mask)
+            vmat = _fxc_mo_add_block(vmo, vmat, ao, mask, occ_coeff_mask, wv, xctype, buf, vtmp_buf)
 
             t1 = log.timer_debug2('integration', *t1)
             ao = wv = None
